@@ -1,0 +1,183 @@
+
+########## wit files list ##########
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\LICENSE-APACHE
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\LICENSE-MIT
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\.github\workflows\test-bindgen.yml
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\advancement.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\attributes.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\bedrock-packets.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\biomes.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\block-entity.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\boss-bar.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\command.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\common.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\context.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\damage-types.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\data-components.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\datapack.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\display.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\enchantments.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\entity-statuses.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\entity-types.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\entity.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\event.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\forms.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\game-events.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\game-rules.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\gui.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\i18n.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\inventory.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\ipc.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\item-stack.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\java-dialogs.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\java-packets.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\log.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\metadata.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\particles.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\permission.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\player.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\plugin.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\potions.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\recipe.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\scheduler.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\scoreboard.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\screens.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\server.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\sounds.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\statistics.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\status-effect.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\text.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\uuid.wit
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\world.wit
+
+########## lib.rs Plugin trait + register_plugin fn (lib.rs search) ##########
+HIT line 27: //!     fn new() -> Self { MyPlugin }
+HIT line 28: //!     fn metadata(&self) -> PluginMetadata {
+HIT line 61: //! fn on_load(&self, context: &Context) -> Result<(), String> {
+HIT line 255: fn on_load(context: Context) -> Result<(), String> {
+HIT line 443: pub trait Plugin: Send + Sync {
+HIT line 447: fn new() -> Self
+HIT line 452: fn metadata(&self) -> PluginMetadata;
+HIT line 457: fn on_load(&self, _context: Context) -> Result<()> {
+HIT line 479: pub fn register_plugin(build_plugin: fn() -> Box<dyn Plugin>) {
+
+pub trait Plugin: Send + Sync {
+    /// Creates a new instance of the plugin.
+    ///
+    /// Called once by the runtime before [`on_load`](Plugin::on_load).
+    fn new() -> Self
+    where
+        Self: Sized;
+
+    /// Returns the metadata for this plugin.
+    fn metadata(&self) -> PluginMetadata;
+
+    /// Called when the plugin is loaded by the server.
+    ///
+    /// Use this to register event handlers, commands, and perform any setup work.
+    fn on_load(&self, _context: Context) -> Result<()> {
+        Ok(())
+    }
+
+    /// Called when the plugin is unloaded by the server.
+    ///
+    /// Use this to clean up any resources acquired during [`on_load`](Plugin::on_load).
+    fn on_unload(&self, _context: Context) -> Result<()> {
+        Ok(())
+    }
+
+    /// Called when the plugin receives a message from another plugin.
+    fn handle_ipc_message(
+        &self,
+        _sender: wit::PluginId,
+        _message: wit::IpcMessage,
+    ) -> Result<wit::IpcMessage, String> {
+        Err("This plugin cannot receive messages.".to_string())
+    }
+}
+
+#[doc(hidden)]
+pub fn register_plugin(build_plugin: fn() -> Box<dyn Plugin>) {
+    let _ = tracing::subscriber::set_global_default(WitSubscriber::new());
+    assert!(
+        PLUGIN.set(build_plugin()).is_ok(),
+        "register_plugin must only be called once"
+    );
+}
+
+/// Returns a reference to the currently loaded plugin instance.
+///
+/// # Panics
+/// If called before [`register_plugin`] has initialized `PLUGIN`.
+fn plugin() -> &'static dyn Plugin {
+    #[allow(clippy::expect_used)]
+    PLUGIN
+        .get()
+        .map(Box::as_ref)
+        .expect("PLUGIN must be initialized with register_plugin before use")
+}
+
+/// The singleton plugin instance, initialised by [`register_plugin`].
+static PLUGIN: OnceLock<Box<dyn Plugin>> = OnceLock::new();
+
+/// Registers the provided type as a Pumpkin plugin.
+///
+/// This macro generates the WebAssembly export entry point that the server uses to
+/// instantiate the plugin. The type must implement the [`Plugin`] trait.
+///
+/// # Example
+/// ```rust,ignore
+/// register_plugin!(MyPlugin);
+/// ```
+#[macro_export]
+macro_rules! register_plugin {
+    ($plugin_type:ty) => {
+        #[unsafe(export_name = "init-plugin")]
+        pub extern "C" fn __init_plugin() {
+            $crate::register_plugin(|| Box::new(<$plugin_type as $crate::Plugin>::new()));
+        }
+    };
+}
+/// AI and mob goal utilities.
+pub mod ai;
+/// Persistent custom data containers (Bukkit-style `PersistentDataHolder`).
+pub mod persistent_data;
+pub use persistent_data::PersistentDataHolder;
+/// Game rules definitions and values.
+pub use wit::pumpkin::plugin::game_rules::{GameRule, GameRuleValue};
+
+########## grep plugin-type / host / data folder in wit ##########
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\bedrock-packets.wit:849: host,
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\bedrock-packets.wit:1131: is-host: bool,
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\command.wit:210: hostile,
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\context.wit:52: get-data-folder: func() -> string;
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\event.wit:311: host: string,
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\event.wit:316: hostname: string,
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\i18n.wit:4: /// Retrieves a translated string from the host.
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\java-packets.wit:543: host: string,
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\java-packets.wit:1134: record c-place-ghost-recipe {
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\java-packets.wit:1470: host: string,
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\java-packets.wit:1771: c-place-ghost-recipe(c-place-ghost-recipe),
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\player.wit:669: host-suspended,
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\player.wit:738: guest-without-host,
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\player.wit:742: host-without-keys,
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\player.wit:743: host-signed-out,
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\player.wit:758: host-disconnected,
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\player.wit:763: host-accepts-no-type-of-auth,
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\player.wit:1003: transfer: func (host: string, port: u16);
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\plugin.wit:2: /// This world defines the exports that the plugin must provide to the host
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\plugin.wit:3: /// and the imports that the host provides to the plugin.
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\plugin.wit:14: // --- Host-provided imports ---
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\plugin.wit:83: /// Called by the host once to initialize the plugin.
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\plugin.wit:95: /// Provides plugin metadata (name, version, etc.) to the host.
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\server.wit:123: /// Hostile mobs do not spawn. Players regain health automatically.
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\server.wit:125: /// Hostile mobs deal less damage.
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\server.wit:129: /// Hostile mobs deal more damage.
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\server.wit:281: get-datapack-manager: func() -> datapack-manager;
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\sounds.wit:10: hostile,
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\sounds.wit:893: entity-hostile-big-fall,
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\sounds.wit:894: entity-hostile-death,
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\sounds.wit:895: entity-hostile-hurt,
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\sounds.wit:896: entity-hostile-small-fall,
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\sounds.wit:897: entity-hostile-splash,
+C:\Users\Baymaxawa\AppData\Local\Temp\pumpkin\crates\pumpkin-plugin-wit\v0.1\sounds.wit:898: entity-hostile-swim,

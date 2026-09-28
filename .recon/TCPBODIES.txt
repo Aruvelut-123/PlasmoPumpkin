@@ -1,0 +1,359 @@
+﻿
+### ActivationRegisterPacket.java
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.activation = new VoiceActivation();
+        activation.deserialize(in);
+    }
+    public void write(ByteArrayDataOutput out) throws IOException {
+        checkNotNull(activation).serialize(out);
+    }
+
+### ActivationUnregisterPacket.java
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.activationId = PacketUtil.readUUID(in);
+    }
+    public void write(ByteArrayDataOutput out) throws IOException {
+        PacketUtil.writeUUID(out, checkNotNull(activationId));
+    }
+
+### AnimatedActionBarPacket.java
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.jsonComponent = in.readUTF();
+    }
+    public void write(ByteArrayDataOutput out) throws IOException {
+        out.writeUTF(checkNotNull(jsonComponent));;
+    }
+
+### ClientPacketTcpHandler.java
+
+### ConfigPacket.java
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.serverId = PacketUtil.readUUID(in);
+
+        this.captureInfo = new CaptureInfo();
+        captureInfo.deserialize(in);
+
+        if (in.readBoolean()) {
+            this.encryption = new EncryptionInfo();
+            encryption.deserialize(in);
+        }
+
+        // source lines
+        this.sourceLines = Sets.newHashSet();
+        int size = PacketUtil.readSafeInt(in, 0, Byte.MAX_VALUE);
+        for (int i = 0; i < size; i++) {
+            VoiceSourceLine sourceLine = new VoiceSourceLine();
+            sourceLine.deserialize(in);
+            sourceLines.add(sourceLine);
+        }
+
+        // activations
+        this.activations = Sets.newHashSet();
+        size = PacketUtil.readSafeInt(in, 0, Byte.MAX_VALUE);
+        for (int i = 0; i < size; i++) {
+            VoiceActivation activation = new VoiceActivation();
+            activation.deserialize(in);
+            activations.add(activation);
+        }
+
+        super.read(in);
+
+        // since 2.1.7
+        // because server can be still on 2.1.6, we have to implement some kind of fallback mechanics here
+        try {
+            this.playerIconConfig = new PlayerIconConfig();
+            playerIconConfig.deserialize(in);
+        } catch (Exception ignored) {
+        }
+    }
+    public void write(ByteArrayDataOutput out) throws IOException {
+        PacketUtil.writeUUID(out, serverId);
+        checkNotNull(captureInfo).serialize(out);
+
+        out.writeBoolean(encryption != null);
+        if (encryption != null) {
+            encryption.serialize(out);
+        }
+
+        // source lines
+        out.writeInt(sourceLines.size());
+        for (VoiceSourceLine sourceLine : sourceLines) {
+            sourceLine.serialize(out);
+        }
+
+        // activations
+        out.writeInt(activations.size());
+        activations.forEach(activation -> activation.serialize(out));
+
+        super.write(out);
+
+        // since 2.1.7
+        playerIconConfig.serialize(out);
+    }
+
+### ConfigPlayerInfoPacket.java
+    public void read(ByteArrayDataInput in) throws IOException {
+        int size = PacketUtil.readSafeInt(in, 0, Byte.MAX_VALUE);
+        for (int i = 0; i < size; i++) {
+            String key = in.readUTF();
+            boolean value = in.readBoolean();
+
+            permissions.put(key, value);
+        }
+    }
+    public void write(ByteArrayDataOutput out) throws IOException {
+        out.writeInt(permissions.size());
+        permissions.forEach((permission, value) -> {
+            out.writeUTF(permission);
+            out.writeBoolean(value);
+        });
+    }
+
+### ConnectionPacket.java
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.secret = PacketUtil.readUUID(in);
+        this.ip = in.readUTF();
+        this.port = in.readInt();
+    }
+    public void write(ByteArrayDataOutput out) throws IOException {
+        checkNotNull(secret, "secret cannot be null");
+        checkNotNull(ip, "ip cannot be null");
+
+        PacketUtil.writeUUID(out, secret);
+        out.writeUTF(ip);
+        out.writeInt(port);
+    }
+
+### DistanceVisualizePacket.java
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.radius = in.readInt();
+        this.hexColor = in.readInt();
+
+        this.position = PacketUtil.readNullable(in, Pos3dSerializer.INSTANCE);
+    }
+    public void write(ByteArrayDataOutput out) throws IOException {
+        out.writeInt(radius);
+        out.writeInt(hexColor);
+
+        PacketUtil.writeNullable(out, Pos3dSerializer.INSTANCE, position);
+    }
+
+### LanguagePacket.java
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.languageName = in.readUTF();
+        this.language = Maps.newHashMap();
+        int size = PacketUtil.readSafeInt(in, 0, Short.MAX_VALUE);
+        for (int i = 0; i < size; i++) {
+            String key = in.readUTF();
+            String value = in.readUTF();
+            language.put(key, value);
+        }
+    }
+    public void write(ByteArrayDataOutput out) throws IOException {
+        out.writeUTF(checkNotNull(languageName));
+        if (language.size() > Short.MAX_VALUE) {
+            throw new IllegalArgumentException("Language size is too big");
+        }
+
+        out.writeInt(language.size());
+        for (Map.Entry<String, String> entry : language.entrySet()) {
+            out.writeUTF(entry.getKey());
+            out.writeUTF(entry.getValue());
+        }
+    }
+
+### PlayerDisconnectPacket.java
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.playerId = PacketUtil.readUUID(in);
+    }
+    public void write(ByteArrayDataOutput out) throws IOException {
+        PacketUtil.writeUUID(out, checkNotNull(playerId));
+    }
+
+### PlayerInfoRequestPacket.java
+    public void read(ByteArrayDataInput in) throws IOException {
+    }
+    public void write(ByteArrayDataOutput out) throws IOException {
+    }
+
+### PlayerInfoUpdatePacket.java
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.playerInfo = new VoicePlayerInfo();
+        playerInfo.deserialize(in);
+    }
+    public void write(ByteArrayDataOutput out) throws IOException {
+        playerInfo.serialize(out);
+    }
+
+### PlayerListPacket.java
+    public void read(ByteArrayDataInput in) throws IOException {
+        int size = PacketUtil.readSafeInt(in, 0, Short.MAX_VALUE);
+        this.players = new ArrayList<>(size);
+
+        for (int i = 0; i < size; i++) {
+            VoicePlayerInfo player = new VoicePlayerInfo();
+            player.deserialize(in);
+            players.add(player);
+        }
+    }
+    public void write(ByteArrayDataOutput out) throws IOException {
+        checkNotNull(players, "players");
+        out.writeInt(players.size());
+        for (VoicePlayerInfo player : players) player.serialize(out);
+    }
+
+### SelfSourceInfoPacket.java
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.sourceInfo = new SelfSourceInfo();
+        sourceInfo.deserialize(in);
+    }
+    public void write(ByteArrayDataOutput out) throws IOException {
+        checkNotNull(this.sourceInfo, "sourceInfo").serialize(out);
+    }
+
+### SourceAudioEndPacket.java
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.sourceId = PacketUtil.readUUID(in);
+        this.sequenceNumber = in.readLong();
+    }
+    public void write(ByteArrayDataOutput out) throws IOException {
+        PacketUtil.writeUUID(out, checkNotNull(sourceId));
+        out.writeLong(sequenceNumber);
+    }
+
+### SourceInfoPacket.java
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.sourceInfo = SourceInfo.of(in);
+    }
+    public void write(ByteArrayDataOutput out) throws IOException {
+        checkNotNull(sourceInfo).serialize(out);
+    }
+
+### SourceLinePlayerAddPacket.java
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.lineId = PacketUtil.readUUID(in);
+        this.player = McGameProfileSerializer.INSTANCE.deserialize(in);
+    }
+    public void write(ByteArrayDataOutput out) throws IOException {
+        PacketUtil.writeUUID(out, checkNotNull(lineId));
+        McGameProfileSerializer.INSTANCE.serialize(checkNotNull(player), out);
+    }
+
+### SourceLinePlayerRemovePacket.java
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.lineId = PacketUtil.readUUID(in);
+        this.playerId = PacketUtil.readUUID(in);
+    }
+    public void write(ByteArrayDataOutput out) throws IOException {
+        PacketUtil.writeUUID(out, checkNotNull(lineId));
+        PacketUtil.writeUUID(out, checkNotNull(playerId));
+    }
+
+### SourceLinePlayersListPacket.java
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.lineId = PacketUtil.readUUID(in);
+        this.players = PacketUtil.readList(in, McGameProfileSerializer.INSTANCE);
+    }
+    public void write(ByteArrayDataOutput out) throws IOException {
+        PacketUtil.writeUUID(out, checkNotNull(lineId));
+        PacketUtil.writeList(out, McGameProfileSerializer.INSTANCE, checkNotNull(players));
+    }
+
+### SourceLineRegisterPacket.java
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.sourceLine = new VoiceSourceLine();
+        sourceLine.deserialize(in);
+    }
+    public void write(ByteArrayDataOutput out) throws IOException {
+        checkNotNull(sourceLine).serialize(out);
+    }
+
+### SourceLineUnregisterPacket.java
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.lineId = PacketUtil.readUUID(in);
+    }
+    public void write(ByteArrayDataOutput out) throws IOException {
+        PacketUtil.writeUUID(out, checkNotNull(lineId));
+    }
+
+### PacketTcpCodec.java
+
+### PacketTcpHandler.java
+
+### LanguageRequestPacket.java
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.language = PacketUtil.readSafeUTF(in, 32);
+    }
+    public void write(ByteArrayDataOutput out) throws IOException {
+        out.writeUTF(checkNotNull(language));
+    }
+
+### PlayerActivationDistancesPacket.java
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.distanceByActivationId = Maps.newHashMap();
+        int size = PacketUtil.readSafeInt(in, 0, Byte.MAX_VALUE);
+        for (int i = 0; i < size; i++) {
+            distanceByActivationId.put(PacketUtil.readUUID(in), in.readInt());
+        }
+    }
+    public void write(ByteArrayDataOutput out) throws IOException {
+        out.writeInt(checkNotNull(distanceByActivationId).size());
+        distanceByActivationId.forEach((activationId, distance) -> {
+            PacketUtil.writeUUID(out, activationId);
+            out.writeInt(distance);
+        });
+    }
+
+### PlayerAudioEndPacket.java
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.sequenceNumber = in.readLong();
+        this.activationId = PacketUtil.readUUID(in);
+        this.distance = in.readShort();
+    }
+    public void write(ByteArrayDataOutput out) throws IOException {
+        out.writeLong(sequenceNumber);
+        PacketUtil.writeUUID(out, checkNotNull(activationId));
+        out.writeShort(distance);
+    }
+
+### PlayerInfoPacket.java
+    public void read(ByteArrayDataInput in) throws IOException {
+        super.read(in);
+
+        this.minecraftVersion = PacketUtil.readSafeUTF(in, 64);
+        this.version = PacketUtil.readSafeUTF(in, 64);
+
+        int length = PacketUtil.readSafeInt(in, 1, 2048);
+        this.publicKey = new byte[length];
+        in.readFully(publicKey);
+    }
+    public void write(ByteArrayDataOutput out) throws IOException {
+        super.write(out);
+
+        out.writeUTF(checkNotNull(minecraftVersion));
+        out.writeUTF(checkNotNull(version));
+
+        checkNotNull(publicKey);
+        out.writeInt(publicKey.length);
+        out.write(publicKey);
+    }
+
+### PlayerStatePacket.java
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.voiceDisabled = in.readBoolean();
+        this.microphoneMuted = in.readBoolean();
+    }
+    public void write(ByteArrayDataOutput out) throws IOException {
+        out.writeBoolean(voiceDisabled);
+        out.writeBoolean(microphoneMuted);
+    }
+
+### ServerPacketTcpHandler.java
+
+### SourceInfoRequestPacket.java
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.sourceId = PacketUtil.readUUID(in);
+    }
+    public void write(ByteArrayDataOutput out) throws IOException {
+        PacketUtil.writeUUID(out, checkNotNull(sourceId));
+    }

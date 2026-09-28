@@ -1,0 +1,283 @@
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\audio\capture\Activation.java =====
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\audio\capture\CaptureInfo.java =====
+  F  public final class CaptureInfo implements PacketSerializable {
+  F  private int sampleRate;
+  F  private int mtuSize;
+  F  private CodecInfo encoderInfo;
+  >> public void deserialize(ByteArrayDataInput in) throws IOException {
+     this.sampleRate = in.readInt();
+     this.mtuSize = in.readInt();
+     if (in.readBoolean()) {
+     this.encoderInfo = new CodecInfo();
+     encoderInfo.deserialize(in);
+     }
+     }
+  >> public void serialize(ByteArrayDataOutput out) {
+     out.writeInt(sampleRate);
+     out.writeInt(mtuSize);
+     out.writeBoolean(encoderInfo != null);
+     if (encoderInfo != null) encoderInfo.serialize(out);
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\audio\capture\VoiceActivation.java =====
+  F  public static final String PROXIMITY_NAME = "proximity";
+  F  public static final UUID PROXIMITY_ID = generateId(PROXIMITY_NAME);
+  F  public static UUID generateId(@NotNull String name) {
+  F  protected UUID id;
+  F  protected String name;
+  F  protected String translation;
+  F  protected String icon;
+  F  protected List<Integer> distances = ImmutableList.of();
+  F  protected int defaultDistance;
+  F  protected boolean proximity;
+  F  protected boolean transitive;
+  F  protected boolean stereoSupported;
+  F  protected @Nullable CodecInfo encoderInfo;
+  F  protected int weight;
+  >> public void deserialize(ByteArrayDataInput in) throws IOException {
+     this.name = in.readUTF();
+     this.translation = in.readUTF();
+     this.icon = in.readUTF();
+     this.id = VoiceActivation.generateId(name);
+     this.distances = PacketUtil.readIntList(in, 64);
+     this.defaultDistance = validateDefaultDistance(distances, in.readInt());
+     this.proximity = in.readBoolean();
+     this.transitive = in.readBoolean();
+     this.stereoSupported = in.readBoolean();
+     if (in.readBoolean()) {
+     this.encoderInfo = new CodecInfo();
+     encoderInfo.deserialize(in);
+     }
+     this.weight = in.readInt();
+     }
+  >> public void serialize(ByteArrayDataOutput out) {
+     out.writeUTF(name);
+     out.writeUTF(translation);
+     out.writeUTF(icon);
+     PacketUtil.writeIntList(out, distances);
+     out.writeInt(defaultDistance);
+     out.writeBoolean(proximity);
+     out.writeBoolean(transitive);
+     out.writeBoolean(stereoSupported);
+     out.writeBoolean(encoderInfo != null);
+     if (encoderInfo != null) encoderInfo.serialize(out);
+     out.writeInt(weight);
+     }
+  F  protected static int validateDefaultDistance(@NotNull List<Integer> distances, int defaultDistance) {
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\audio\codec\CodecInfo.java =====
+  F  protected String name;
+  F  protected Map<String, String> params;
+  >> public void deserialize(ByteArrayDataInput in) throws IOException {
+     this.name = in.readUTF();
+     this.params = Maps.newHashMap();
+     int size = PacketUtil.readSafeInt(in, 0, 128);
+     for (int i = 0; i < size; i++) {
+     params.put(in.readUTF(), in.readUTF());
+     }
+     }
+  >> public void serialize(ByteArrayDataOutput out) {
+     out.writeUTF(checkNotNull(name));
+     checkNotNull(params);
+     out.writeInt(params.size());
+     params.forEach((key, value) -> {
+     out.writeUTF(key);
+     out.writeUTF(value);
+     });
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\audio\line\SourceLine.java =====
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\audio\line\VoiceSourceLine.java =====
+  F  public static final String PROXIMITY_NAME = "proximity";
+  F  public static final UUID PROXIMITY_ID = generateId(PROXIMITY_NAME);
+  F  public static UUID generateId(@NotNull String name) {
+  F  protected UUID id;
+  F  protected String name;
+  F  protected String translation;
+  F  protected String icon;
+  F  protected double defaultVolume;
+  F  protected int weight;
+  F  protected Set<McGameProfile> players = null;
+  >> public void deserialize(ByteArrayDataInput in) throws IOException {
+     this.name = in.readUTF();
+     this.id = generateId(name);
+     this.translation = in.readUTF();
+     this.icon = in.readUTF();
+     this.defaultVolume = in.readDouble();
+     this.weight = in.readInt();
+     if (in.readBoolean()) {
+     this.players = new HashSet<>();
+     int size = PacketUtil.readSafeInt(in, 0, Short.MAX_VALUE);
+     for (int i = 0; i < size; i++) {
+     players.add(McGameProfileSerializer.INSTANCE.deserialize(in));
+     }
+     }
+     }
+  >> public void serialize(ByteArrayDataOutput out) throws IOException {
+     out.writeUTF(name);
+     out.writeUTF(translation);
+     out.writeUTF(icon);
+     out.writeDouble(defaultVolume);
+     out.writeInt(weight);
+     out.writeBoolean(hasPlayers());
+     if (hasPlayers()) {
+     out.writeInt(players.size());
+     for (McGameProfile player : players) {
+     McGameProfileSerializer.INSTANCE.serialize(player, out);
+     }
+     }
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\audio\source\DirectSourceInfo.java =====
+  F  public final class DirectSourceInfo extends SourceInfo {
+  F  private @Nullable McGameProfile sender;
+  F  private @Nullable Pos3d relativePosition;
+  F  private @Nullable Pos3d lookAngle;
+  F  private boolean cameraRelative = true;
+  >> public void deserialize(ByteArrayDataInput in) throws IOException {
+     super.deserialize(in);
+     if (in.readBoolean()) {
+     this.sender = McGameProfileSerializer.INSTANCE.deserialize(in);
+     }
+     if (in.readBoolean()) {
+     this.relativePosition = Pos3dSerializer.INSTANCE.deserialize(in);
+     }
+     this.cameraRelative = in.readBoolean();
+     }
+  >> public void serialize(ByteArrayDataOutput out) throws IOException {
+     super.serialize(out);
+     out.writeBoolean(sender != null);
+     if (sender != null) McGameProfileSerializer.INSTANCE.serialize(sender, out);
+     out.writeBoolean(relativePosition != null);
+     if (relativePosition != null) Pos3dSerializer.INSTANCE.serialize(relativePosition, out);
+     out.writeBoolean(cameraRelative);
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\audio\source\EntitySourceInfo.java =====
+  F  public final class EntitySourceInfo extends SourceInfo {
+  F  private int entityId;
+  >> public void deserialize(ByteArrayDataInput in) throws IOException {
+     super.deserialize(in);
+     this.entityId = in.readInt();
+     }
+  >> public void serialize(ByteArrayDataOutput out) throws IOException {
+     super.serialize(out);
+     out.writeInt(entityId);
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\audio\source\PlayerSourceInfo.java =====
+  F  public final class PlayerSourceInfo extends SourceInfo {
+  F  private VoicePlayerInfo playerInfo;
+  >> public void deserialize(ByteArrayDataInput in) throws IOException {
+     super.deserialize(in);
+     this.playerInfo = new VoicePlayerInfo();
+     playerInfo.deserialize(in);
+     }
+  >> public void serialize(ByteArrayDataOutput out) throws IOException {
+     super.serialize(out);
+     checkNotNull(playerInfo, "playerInfo").serialize(out);
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\audio\source\SelfSourceInfo.java =====
+  F  private SourceInfo sourceInfo;
+  F  private UUID playerId;
+  F  private UUID activationId;
+  F  private long sequenceNumber;
+  >> public void deserialize(ByteArrayDataInput in) throws IOException {
+     this.sourceInfo = SourceInfo.of(in);
+     this.playerId = PacketUtil.readUUID(in);
+     this.activationId = PacketUtil.readUUID(in);
+     this.sequenceNumber = in.readLong();
+     }
+  >> public void serialize(ByteArrayDataOutput out) throws IOException {
+     checkNotNull(sourceInfo).serialize(out);
+     PacketUtil.writeUUID(out, playerId);
+     PacketUtil.writeUUID(out, activationId);
+     out.writeLong(sequenceNumber);
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\audio\source\SourceInfo.java =====
+  F  public static SourceInfo of(ByteArrayDataInput in) throws IOException {
+  F  protected String addonId;
+  F  protected UUID id;
+  F  protected UUID lineId;
+  F  protected @Nullable String name;
+  F  protected byte state;
+  F  protected @Nullable CodecInfo decoderInfo;
+  F  protected boolean stereo;
+  F  protected boolean iconVisible;
+  F  protected int angle;
+  >> public void deserialize(ByteArrayDataInput in) throws IOException {
+     this.addonId = in.readUTF();
+     this.id = PacketUtil.readUUID(in);
+     this.name = PacketUtil.readNullableString(in);
+     this.state = in.readByte();
+     if (in.readBoolean()) {
+     this.decoderInfo = new CodecInfo();
+     decoderInfo.deserialize(in);
+     }
+     this.stereo = in.readBoolean();
+     this.lineId = PacketUtil.readUUID(in);
+     this.iconVisible = in.readBoolean();
+     this.angle = in.readInt();
+     }
+  >> public void serialize(ByteArrayDataOutput out) throws IOException {
+     out.writeUTF(getType().name());
+     out.writeUTF(checkNotNull(addonId));
+     PacketUtil.writeUUID(out, checkNotNull(id));
+     PacketUtil.writeNullableString(out, name);
+     out.writeByte(state);
+     out.writeBoolean(decoderInfo != null);
+     if (decoderInfo != null) {
+     decoderInfo.serialize(out);
+     }
+     out.writeBoolean(stereo);
+     PacketUtil.writeUUID(out, lineId);
+     out.writeBoolean(iconVisible);
+     out.writeInt(angle);
+     }
+  F  private final Supplier<SourceInfo> sourceInfoSupplier;
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\audio\source\StaticSourceInfo.java =====
+  F  public final class StaticSourceInfo extends SourceInfo {
+  F  private Pos3d position;
+  F  private Pos3d lookAngle;
+  >> public void deserialize(ByteArrayDataInput in) throws IOException {
+     super.deserialize(in);
+     this.position = Pos3dSerializer.INSTANCE.deserialize(in);
+     this.lookAngle = Pos3dSerializer.INSTANCE.deserialize(in);
+     }
+  >> public void serialize(ByteArrayDataOutput out) throws IOException {
+     super.serialize(out);
+     Pos3dSerializer.INSTANCE.serialize(checkNotNull(position), out);
+     Pos3dSerializer.INSTANCE.serialize(checkNotNull(lookAngle), out);
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\encryption\EncryptionInfo.java =====
+  F  public final class EncryptionInfo implements PacketSerializable {
+  F  private String algorithm;
+  F  private byte[] data;
+  >> public void deserialize(ByteArrayDataInput in) throws IOException {
+     this.algorithm = in.readUTF();
+     int length = PacketUtil.readSafeInt(in, 1, 2048);
+     byte[] data = new byte[length];
+     in.readFully(data);
+     this.data = data;
+     }
+  >> public void serialize(ByteArrayDataOutput out) {
+     checkNotNull(algorithm, "algorithm cannot be null");
+     checkNotNull(data, "data cannot be null");
+     out.writeUTF(algorithm);
+     out.writeInt(data.length);
+     out.write(data);
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\player\VoicePlayerInfo.java =====
+  F  private UUID playerId;
+  F  private String playerNick;
+  F  private boolean muted;
+  F  private boolean voiceDisabled;
+  F  private boolean microphoneMuted;
+  >> public void deserialize(ByteArrayDataInput in) {
+     this.playerId = PacketUtil.readUUID(in);
+     this.playerNick = in.readUTF();
+     this.muted = in.readBoolean();
+     this.voiceDisabled = in.readBoolean();
+     this.microphoneMuted = in.readBoolean();
+     }
+  >> public void serialize(ByteArrayDataOutput out) {
+     PacketUtil.writeUUID(out, checkNotNull(playerId));
+     out.writeUTF(checkNotNull(playerNick));
+     out.writeBoolean(muted);
+     out.writeBoolean(voiceDisabled);
+     out.writeBoolean(microphoneMuted);
+     }

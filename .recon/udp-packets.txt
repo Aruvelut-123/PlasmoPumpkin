@@ -1,0 +1,703 @@
+@@@@@ FILE: C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\bothbound\BaseAudioPacket.java
+package su.plo.voice.proto.packets.udp.bothbound;
+
+import com.google.common.io.ByteArrayDataInput;
+import com.google.common.io.ByteArrayDataOutput;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.ToString;
+import su.plo.voice.proto.packets.Packet;
+import su.plo.voice.proto.packets.PacketHandler;
+import su.plo.voice.proto.packets.PacketUtil;
+
+import java.io.IOException;
+
+import static com.google.common.base.Preconditions.checkArgument;
+
+@NoArgsConstructor
+@ToString
+public abstract class BaseAudioPacket<T extends PacketHandler> implements Packet<T> {
+
+    @Getter
+    protected long sequenceNumber;
+    @Getter
+    protected byte[] data;
+
+    public BaseAudioPacket(long sequenceNumber, byte[] data) {
+        this.sequenceNumber = sequenceNumber;
+        this.data = data;
+
+        checkArgument(data.length > 0, "audio data cannot be empty");
+    }
+
+    @Override
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.sequenceNumber = in.readLong();
+
+        int length = PacketUtil.readSafeInt(in, 1, 2048);
+        byte[] data = new byte[length];
+        in.readFully(data);
+        this.data = data;
+    }
+
+    @Override
+    public void write(ByteArrayDataOutput out) throws IOException {
+        out.writeLong(sequenceNumber);
+
+        out.writeInt(data.length);
+        out.write(data);
+    }
+}
+
+@@@@@ FILE: C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\bothbound\CustomPacket.java
+package su.plo.voice.proto.packets.udp.bothbound;
+
+import com.google.common.io.ByteArrayDataInput;
+import com.google.common.io.ByteArrayDataOutput;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.ToString;
+import su.plo.voice.proto.packets.Packet;
+import su.plo.voice.proto.packets.udp.PacketUdpHandler;
+
+import java.io.IOException;
+
+import static com.google.common.base.Preconditions.checkNotNull;
+
+@NoArgsConstructor
+@AllArgsConstructor
+@ToString
+public class CustomPacket implements Packet<PacketUdpHandler> {
+
+    @Getter
+    private String addonId;
+    @Getter
+    private byte[] payload;
+
+    @Override
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.addonId = in.readUTF();
+    }
+
+    @Override
+    public void write(ByteArrayDataOutput out) throws IOException {
+        checkNotNull(addonId, "addonId cannot be null");
+        checkNotNull(payload, "payload cannot be null");
+
+        out.writeUTF(addonId);
+        out.writeInt(payload.length);
+        out.write(payload);
+    }
+
+    @Override
+    public void handle(PacketUdpHandler handler) {
+        handler.handle(this);
+    }
+}
+
+@@@@@ FILE: C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\bothbound\PingPacket.java
+package su.plo.voice.proto.packets.udp.bothbound;
+
+import com.google.common.io.ByteArrayDataInput;
+import com.google.common.io.ByteArrayDataOutput;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.ToString;
+import org.jetbrains.annotations.NotNull;
+import su.plo.voice.proto.packets.Packet;
+import su.plo.voice.proto.packets.PacketUtil;
+import su.plo.voice.proto.packets.udp.PacketUdpHandler;
+
+import java.io.IOException;
+
+@ToString
+@NoArgsConstructor
+public class PingPacket implements Packet<PacketUdpHandler> {
+
+    @Getter
+    private long time = System.currentTimeMillis();
+
+    @Getter
+    private String serverIp;
+    @Getter
+    private int serverPort;
+
+    public PingPacket(@NotNull String serverIp, int serverPort) {
+        this.serverIp = serverIp;
+        this.serverPort = serverPort;
+    }
+
+    @Override
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.time = in.readLong();
+
+        try {
+            this.serverIp = PacketUtil.readSafeUTF(in, 255);
+            this.serverPort = in.readUnsignedShort();
+        } catch (Exception ignored) {
+            // ignore exceptions here, because it's optional
+        }
+    }
+
+    @Override
+    public void write(ByteArrayDataOutput out) throws IOException {
+        out.writeLong(time);
+
+        if (serverIp != null && serverPort > 0) {
+            out.writeUTF(serverIp);
+            out.writeShort(serverPort);
+        }
+    }
+
+    @Override
+    public void handle(PacketUdpHandler handler) {
+        handler.handle(this);
+    }
+}
+
+@@@@@ FILE: C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\clientbound\ClientPacketUdpHandler.java
+package su.plo.voice.proto.packets.udp.clientbound;
+
+import org.jetbrains.annotations.NotNull;
+import su.plo.voice.proto.packets.udp.PacketUdpHandler;
+
+public interface ClientPacketUdpHandler extends PacketUdpHandler {
+
+    void handle(@NotNull SourceAudioPacket packet);
+
+    void handle(@NotNull SelfAudioInfoPacket packet);
+}
+
+@@@@@ FILE: C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\clientbound\SelfAudioInfoPacket.java
+package su.plo.voice.proto.packets.udp.clientbound;
+
+import com.google.common.io.ByteArrayDataInput;
+import com.google.common.io.ByteArrayDataOutput;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.ToString;
+import su.plo.voice.proto.packets.Packet;
+import su.plo.voice.proto.packets.PacketUtil;
+
+import java.io.IOException;
+import java.util.Optional;
+import java.util.UUID;
+
+import static com.google.common.base.Preconditions.checkNotNull;
+
+@AllArgsConstructor
+@NoArgsConstructor
+@ToString
+public final class SelfAudioInfoPacket implements Packet<ClientPacketUdpHandler> {
+
+    @Getter
+    private UUID sourceId;
+    @Getter
+    private long sequenceNumber;
+    private byte[] data;
+    @Getter
+    private short distance;
+
+    /**
+     * Returns data only if it has been changed on the server.
+     */
+    public Optional<byte[]> getData() {
+        return Optional.ofNullable(data);
+    }
+
+    @Override
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.sourceId = PacketUtil.readUUID(in);
+        this.sequenceNumber = in.readLong();
+        if (in.readBoolean()) {
+            int length = PacketUtil.readSafeInt(in, 1, 2048);
+            byte[] data = new byte[length];
+            in.readFully(data);
+            this.data = data;
+        }
+        this.distance = in.readShort();
+    }
+
+    @Override
+    public void write(ByteArrayDataOutput out) throws IOException {
+        PacketUtil.writeUUID(out, checkNotNull(sourceId, "sourceId"));
+        out.writeLong(sequenceNumber);
+        out.writeBoolean(data != null);
+        if (data != null) {
+            out.writeInt(data.length);
+            out.write(data);
+        }
+        out.writeShort(distance);
+    }
+
+    @Override
+    public void handle(ClientPacketUdpHandler handler) {
+        handler.handle(this);
+    }
+}
+
+@@@@@ FILE: C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\clientbound\SourceAudioPacket.java
+package su.plo.voice.proto.packets.udp.clientbound;
+
+import com.google.common.io.ByteArrayDataInput;
+import com.google.common.io.ByteArrayDataOutput;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
+import lombok.ToString;
+import org.jetbrains.annotations.NotNull;
+import su.plo.voice.proto.packets.PacketUtil;
+import su.plo.voice.proto.packets.udp.bothbound.BaseAudioPacket;
+
+import java.io.IOException;
+import java.util.UUID;
+
+import static com.google.common.base.Preconditions.checkNotNull;
+
+@NoArgsConstructor
+@ToString(callSuper = true)
+public final class SourceAudioPacket extends BaseAudioPacket<ClientPacketUdpHandler> {
+
+    @Getter
+    private UUID sourceId;
+    @Getter
+    @Setter
+    private byte sourceState;
+    @Getter
+    @Setter
+    private short distance;
+
+    public SourceAudioPacket(long sequenceNumber, byte sourceState, byte[] data, @NotNull UUID sourceId, short distance) {
+        super(sequenceNumber, data);
+        this.sourceId = sourceId;
+        this.sourceState = sourceState;
+        this.distance = distance;
+    }
+
+    @Override
+    public void read(ByteArrayDataInput in) throws IOException {
+        super.read(in);
+
+        this.sourceId = PacketUtil.readUUID(in);
+        this.sourceState = in.readByte();
+        this.distance = in.readShort();
+    }
+
+    @Override
+    public void write(ByteArrayDataOutput out) throws IOException {
+        super.write(out);
+
+        PacketUtil.writeUUID(out, checkNotNull(sourceId, "sourceId"));
+        out.writeByte(sourceState);
+        out.writeShort(distance);
+    }
+
+    @Override
+    public void handle(ClientPacketUdpHandler handler) {
+        handler.handle(this);
+    }
+}
+
+@@@@@ FILE: C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\PacketUdp.java
+package su.plo.voice.proto.packets.udp;
+
+import com.google.common.io.ByteArrayDataInput;
+import lombok.Getter;
+import lombok.ToString;
+import org.jetbrains.annotations.NotNull;
+import su.plo.voice.proto.packets.Packet;
+import su.plo.voice.proto.packets.PacketHandler;
+
+import java.io.IOException;
+import java.util.UUID;
+
+@ToString(exclude = {"packet", "input", "read"})
+public class PacketUdp {
+
+    @Getter
+    private final UUID secret;
+    @Getter
+    private final long timestamp;
+    private final Packet<?> packet;
+
+    @Getter
+    private ByteArrayDataInput input;
+    @Getter
+    private boolean read;
+
+    public PacketUdp(
+            @NotNull UUID secret,
+            long timestamp,
+            @NotNull Packet<?> packet,
+            @NotNull ByteArrayDataInput input
+    ) {
+        this.secret = secret;
+        this.timestamp = timestamp;
+        this.packet = packet;
+        this.input = input;
+    }
+
+    public PacketUdp(
+            @NotNull UUID secret,
+            long timestamp,
+            @NotNull Packet<?> packet
+    ) {
+        this.secret = secret;
+        this.timestamp = timestamp;
+        this.packet = packet;
+        this.read = true;
+    }
+
+    public Class<?> getPacketClass() {
+        return packet.getClass();
+    }
+
+    public Packet<?> getPacketUntyped() throws IOException {
+        if (!read) readPacket();
+
+        return packet;
+    }
+
+    public <T extends PacketHandler> Packet<T> getPacket() throws IOException {
+        if (!read) readPacket();
+
+        return (Packet<T>) packet;
+    }
+
+    private synchronized void readPacket() throws IOException {
+        if (input == null) return;
+
+        this.read = true;
+        packet.read(input);
+        this.input = null;
+    }
+}
+
+@@@@@ FILE: C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\PacketUdpCodec.java
+package su.plo.voice.proto.packets.udp;
+
+import com.google.common.io.ByteArrayDataInput;
+import com.google.common.io.ByteArrayDataOutput;
+import com.google.common.io.ByteStreams;
+import org.jetbrains.annotations.NotNull;
+import su.plo.voice.proto.packets.Packet;
+import su.plo.voice.proto.packets.PacketDirection;
+import su.plo.voice.proto.packets.PacketRegistry;
+import su.plo.voice.proto.packets.PacketUtil;
+import su.plo.voice.proto.packets.udp.bothbound.CustomPacket;
+import su.plo.voice.proto.packets.udp.bothbound.PingPacket;
+import su.plo.voice.proto.packets.udp.clientbound.SelfAudioInfoPacket;
+import su.plo.voice.proto.packets.udp.clientbound.SourceAudioPacket;
+import su.plo.voice.proto.packets.udp.serverbound.PlayerAudioPacket;
+
+import java.io.IOException;
+import java.util.Optional;
+import java.util.UUID;
+
+public class PacketUdpCodec {
+
+    // magic number is used to filter packets received not from PV
+    private static final int MAGIC_NUMBER = 0x4e9004e9;
+    private static final PacketRegistry PACKETS = new PacketRegistry();
+
+    static {
+        int lastPacketId = 0x0;
+
+        PACKETS.register(++lastPacketId, PacketDirection.ANY, PingPacket.class, PingPacket::new);
+        PACKETS.register(++lastPacketId, PacketDirection.SERVER, PlayerAudioPacket.class, PlayerAudioPacket::new);
+        PACKETS.register(++lastPacketId, PacketDirection.CLIENT, SourceAudioPacket.class, SourceAudioPacket::new);
+        PACKETS.register(++lastPacketId, PacketDirection.CLIENT, SelfAudioInfoPacket.class, SelfAudioInfoPacket::new);
+        PACKETS.register(0x100, PacketDirection.ANY, CustomPacket.class, CustomPacket::new);
+    }
+
+    public static byte[] replaceSecret(byte[] data, UUID secret) {
+        ByteArrayDataOutput out = ByteStreams.newDataOutput();
+        PacketUtil.writeUUID(out, secret);
+
+        System.arraycopy(out.toByteArray(), 0, data, 5, 16);
+        return data;
+    }
+
+    public static void encodeThrowing(
+            @NotNull Packet<?> packet,
+            @NotNull UUID secret,
+            @NotNull ByteArrayDataOutput out
+    ) throws IOException {
+        int type = PACKETS.getType(packet);
+        if (type < 0) throw new IOException("Unknown packet type");
+
+        out.writeInt(MAGIC_NUMBER);
+        out.writeByte(type);
+        PacketUtil.writeUUID(out, secret);
+        out.writeLong(System.currentTimeMillis());
+
+        packet.write(out);
+    }
+
+    public static byte[] encodeThrowing(@NotNull Packet<?> packet, @NotNull UUID secret) throws IOException {
+        ByteArrayDataOutput out = ByteStreams.newDataOutput();
+
+        encodeThrowing(packet, secret, out);
+
+        return out.toByteArray();
+    }
+
+    public static byte[] encode(@NotNull Packet<?> packet, @NotNull UUID secret) {
+        try {
+            return encodeThrowing(packet, secret);
+        } catch (IOException e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+
+    public static @NotNull PacketUdp decodeThrowing(
+            @NotNull ByteArrayDataInput in,
+            @NotNull PacketDirection direction
+    ) throws IOException {
+        if (in.readInt() != MAGIC_NUMBER) throw new IOException("Magic number in packet header doesn't match");
+
+        Packet<?> packet = PACKETS.byType(in.readByte(), direction);
+        if (packet == null) throw new IOException("Unknown packet type");
+
+        UUID secret = PacketUtil.readUUID(in);
+        long timestamp = in.readLong();
+
+        return new PacketUdp(secret, timestamp, packet, in);
+    }
+
+    public static Optional<PacketUdp> decode(ByteArrayDataInput in) throws IOException {
+        return decode(in, PacketDirection.ANY);
+    }
+
+    public static Optional<PacketUdp> decode(
+            @NotNull ByteArrayDataInput in,
+            @NotNull PacketDirection direction
+    ) throws IOException {
+        try {
+            if (in.readInt() != MAGIC_NUMBER) return Optional.empty(); // bad packet
+        } catch (Exception e) {
+            return Optional.empty();
+        }
+
+        Packet<?> packet = PACKETS.byType(in.readByte(), direction);
+        if (packet != null) {
+            UUID secret = PacketUtil.readUUID(in);
+            long timestamp = in.readLong();
+
+            return Optional.of(new PacketUdp(secret, timestamp, packet, in));
+        }
+
+        return Optional.empty();
+    }
+
+    private PacketUdpCodec() {
+    }
+}
+
+@@@@@ FILE: C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\PacketUdpHandler.java
+package su.plo.voice.proto.packets.udp;
+
+import org.jetbrains.annotations.NotNull;
+import su.plo.voice.proto.packets.PacketHandler;
+import su.plo.voice.proto.packets.udp.bothbound.CustomPacket;
+import su.plo.voice.proto.packets.udp.bothbound.PingPacket;
+
+public interface PacketUdpHandler extends PacketHandler {
+
+    void handle(@NotNull PingPacket packet);
+
+    void handle(@NotNull CustomPacket packet);
+}
+
+@@@@@ FILE: C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\serverbound\PlayerAudioPacket.java
+package su.plo.voice.proto.packets.udp.serverbound;
+
+import com.google.common.io.ByteArrayDataInput;
+import com.google.common.io.ByteArrayDataOutput;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.ToString;
+import org.jetbrains.annotations.NotNull;
+import su.plo.voice.proto.packets.PacketUtil;
+import su.plo.voice.proto.packets.udp.bothbound.BaseAudioPacket;
+
+import java.io.IOException;
+import java.util.UUID;
+
+import static com.google.common.base.Preconditions.checkNotNull;
+
+@NoArgsConstructor
+@ToString
+public final class PlayerAudioPacket extends BaseAudioPacket<ServerPacketUdpHandler> {
+
+    @Getter
+    private UUID activationId;
+    @Getter
+    private short distance;
+    @Getter
+    private boolean stereo;
+
+    public PlayerAudioPacket(long sequenceNumber, byte[] data, @NotNull UUID activationId, short distance, boolean stereo) {
+        super(sequenceNumber, data);
+
+        this.activationId = checkNotNull(activationId);
+        this.distance = distance;
+        this.stereo = stereo;
+    }
+
+    @Override
+    public void read(ByteArrayDataInput in) throws IOException {
+        super.read(in);
+
+        this.activationId = PacketUtil.readUUID(in);
+        this.distance = in.readShort();
+        this.stereo = in.readBoolean();
+    }
+
+    @Override
+    public void write(ByteArrayDataOutput out) throws IOException {
+        super.write(out);
+
+        PacketUtil.writeUUID(out, checkNotNull(activationId));
+        out.writeShort(distance);
+        out.writeBoolean(stereo);
+    }
+
+    @Override
+    public void handle(ServerPacketUdpHandler handler) {
+        handler.handle(this);
+    }
+}
+
+@@@@@ FILE: C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\serverbound\ServerPacketUdpHandler.java
+package su.plo.voice.proto.packets.udp.serverbound;
+
+import org.jetbrains.annotations.NotNull;
+import su.plo.voice.proto.packets.udp.PacketUdpHandler;
+
+public interface ServerPacketUdpHandler extends PacketUdpHandler {
+
+    void handle(@NotNull PlayerAudioPacket packet);
+}
+
+@@@@@ FILE: C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\PacketTcpCodec.java
+package su.plo.voice.proto.packets.tcp;
+
+import com.google.common.io.ByteArrayDataInput;
+import com.google.common.io.ByteArrayDataOutput;
+import com.google.common.io.ByteStreams;
+import org.jetbrains.annotations.NotNull;
+import su.plo.voice.proto.packets.Packet;
+import su.plo.voice.proto.packets.PacketDirection;
+import su.plo.voice.proto.packets.PacketHandler;
+import su.plo.voice.proto.packets.PacketRegistry;
+import su.plo.voice.proto.packets.tcp.clientbound.ActivationRegisterPacket;
+import su.plo.voice.proto.packets.tcp.clientbound.ActivationUnregisterPacket;
+import su.plo.voice.proto.packets.tcp.clientbound.AnimatedActionBarPacket;
+import su.plo.voice.proto.packets.tcp.clientbound.ConfigPacket;
+import su.plo.voice.proto.packets.tcp.clientbound.ConfigPlayerInfoPacket;
+import su.plo.voice.proto.packets.tcp.clientbound.ConnectionPacket;
+import su.plo.voice.proto.packets.tcp.clientbound.DistanceVisualizePacket;
+import su.plo.voice.proto.packets.tcp.clientbound.LanguagePacket;
+import su.plo.voice.proto.packets.tcp.clientbound.PlayerDisconnectPacket;
+import su.plo.voice.proto.packets.tcp.clientbound.PlayerInfoRequestPacket;
+import su.plo.voice.proto.packets.tcp.clientbound.PlayerInfoUpdatePacket;
+import su.plo.voice.proto.packets.tcp.clientbound.PlayerListPacket;
+import su.plo.voice.proto.packets.tcp.clientbound.SelfSourceInfoPacket;
+import su.plo.voice.proto.packets.tcp.clientbound.SourceAudioEndPacket;
+import su.plo.voice.proto.packets.tcp.clientbound.SourceInfoPacket;
+import su.plo.voice.proto.packets.tcp.clientbound.SourceLinePlayerAddPacket;
+import su.plo.voice.proto.packets.tcp.clientbound.SourceLinePlayerRemovePacket;
+import su.plo.voice.proto.packets.tcp.clientbound.SourceLinePlayersListPacket;
+import su.plo.voice.proto.packets.tcp.clientbound.SourceLineRegisterPacket;
+import su.plo.voice.proto.packets.tcp.clientbound.SourceLineUnregisterPacket;
+import su.plo.voice.proto.packets.tcp.serverbound.LanguageRequestPacket;
+import su.plo.voice.proto.packets.tcp.serverbound.PlayerActivationDistancesPacket;
+import su.plo.voice.proto.packets.tcp.serverbound.PlayerAudioEndPacket;
+import su.plo.voice.proto.packets.tcp.serverbound.PlayerInfoPacket;
+import su.plo.voice.proto.packets.tcp.serverbound.PlayerStatePacket;
+import su.plo.voice.proto.packets.tcp.serverbound.SourceInfoRequestPacket;
+
+import java.io.IOException;
+import java.util.Optional;
+
+@SuppressWarnings({"unchecked"})
+public class PacketTcpCodec {
+
+    private static final PacketRegistry PACKETS = new PacketRegistry();
+
+    static {
+        int lastPacketId = 0x0;
+
+        PACKETS.register(++lastPacketId, PacketDirection.CLIENT, ConnectionPacket.class, ConnectionPacket::new);
+        PACKETS.register(++lastPacketId, PacketDirection.CLIENT, PlayerInfoRequestPacket.class, PlayerInfoRequestPacket::new);
+        PACKETS.register(++lastPacketId, PacketDirection.CLIENT, ConfigPacket.class, ConfigPacket::new);
+        PACKETS.register(++lastPacketId, PacketDirection.CLIENT, ConfigPlayerInfoPacket.class, ConfigPlayerInfoPacket::new);
+        PACKETS.register(++lastPacketId, PacketDirection.SERVER, LanguageRequestPacket.class, LanguageRequestPacket::new);
+        PACKETS.register(++lastPacketId, PacketDirection.CLIENT, LanguagePacket.class, LanguagePacket::new);
+
+        PACKETS.register(++lastPacketId, PacketDirection.CLIENT, PlayerListPacket.class, PlayerListPacket::new);
+        PACKETS.register(++lastPacketId, PacketDirection.CLIENT, PlayerInfoUpdatePacket.class, PlayerInfoUpdatePacket::new);
+        PACKETS.register(++lastPacketId, PacketDirection.CLIENT, PlayerDisconnectPacket.class, PlayerDisconnectPacket::new);
+        PACKETS.register(++lastPacketId, PacketDirection.SERVER, PlayerInfoPacket.class, PlayerInfoPacket::new);
+        PACKETS.register(++lastPacketId, PacketDirection.SERVER, PlayerStatePacket.class, PlayerStatePacket::new);
+        PACKETS.register(++lastPacketId, PacketDirection.SERVER, PlayerAudioEndPacket.class, PlayerAudioEndPacket::new);
+        PACKETS.register(++lastPacketId, PacketDirection.SERVER, PlayerActivationDistancesPacket.class, PlayerActivationDistancesPacket::new);
+
+        PACKETS.register(++lastPacketId, PacketDirection.CLIENT, DistanceVisualizePacket.class, DistanceVisualizePacket::new);
+
+        PACKETS.register(++lastPacketId, PacketDirection.SERVER, SourceInfoRequestPacket.class, SourceInfoRequestPacket::new);
+        PACKETS.register(++lastPacketId, PacketDirection.CLIENT, SourceInfoPacket.class, SourceInfoPacket::new);
+        PACKETS.register(++lastPacketId, PacketDirection.CLIENT, SelfSourceInfoPacket.class, SelfSourceInfoPacket::new);
+        PACKETS.register(++lastPacketId, PacketDirection.CLIENT, SourceAudioEndPacket.class, SourceAudioEndPacket::new);
+
+        PACKETS.register(++lastPacketId, PacketDirection.CLIENT, ActivationRegisterPacket.class, ActivationRegisterPacket::new);
+        PACKETS.register(++lastPacketId, PacketDirection.CLIENT, ActivationUnregisterPacket.class, ActivationUnregisterPacket::new);
+
+        PACKETS.register(++lastPacketId, PacketDirection.CLIENT, SourceLineRegisterPacket.class, SourceLineRegisterPacket::new);
+        PACKETS.register(++lastPacketId, PacketDirection.CLIENT, SourceLineUnregisterPacket.class, SourceLineUnregisterPacket::new);
+        PACKETS.register(++lastPacketId, PacketDirection.CLIENT, SourceLinePlayerAddPacket.class, SourceLinePlayerAddPacket::new);
+        PACKETS.register(++lastPacketId, PacketDirection.CLIENT, SourceLinePlayerRemovePacket.class, SourceLinePlayerRemovePacket::new);
+        PACKETS.register(++lastPacketId, PacketDirection.CLIENT, SourceLinePlayersListPacket.class, SourceLinePlayersListPacket::new);
+
+        PACKETS.register(++lastPacketId, PacketDirection.CLIENT, AnimatedActionBarPacket.class, AnimatedActionBarPacket::new);
+    }
+
+    public static byte[] encode(Packet<?> packet) {
+        int type = PACKETS.getType(packet);
+        if (type < 0) return null;
+
+        ByteArrayDataOutput out = ByteStreams.newDataOutput();
+        out.writeByte(type);
+        try {
+            packet.write(out);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        return out.toByteArray();
+    }
+
+    public static <T extends PacketHandler> Optional<Packet<T>> decode(ByteArrayDataInput buf) throws IOException {
+        return decode(buf, PacketDirection.ANY);
+    }
+
+    public static <T extends PacketHandler> Optional<Packet<T>> decode(
+            @NotNull ByteArrayDataInput buf,
+            @NotNull PacketDirection direction
+    ) throws IOException {
+        Packet<T> packet = (Packet<T>) PACKETS.byType(buf.readByte(), direction);
+        if (packet != null) {
+            packet.read(buf);
+            return Optional.of(packet);
+        }
+
+        return Optional.empty();
+    }
+
+    private PacketTcpCodec() {
+    }
+}
+

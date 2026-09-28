@@ -1,0 +1,627 @@
+===== server\common\src\main\java\su\plo\voice\server\socket\NettyUdpServer.java =====
+public final class NettyUdpServer implements UdpServer {
+    // Spigot overwrites io.netty.eventLoopThreads with spigot.yml's netty-threads (default 4)
+    // so we have to avoid netty default amount of threads path
+    private static final int DEFAULT_THREADS = Math.max(
+            1,
+            SystemPropertyKt.getIntSystemProperty(
+                    "plasmovoice.udp_threads",
+                    Runtime.getRuntime().availableProcessors() * 2
+            )
+    );
+    private final boolean useEpoll = System.getProperty("plasmovoice.use_epoll", "true").equals("true") &&
+            Epoll.isAvailable();
+    private final EventLoopGroup loopGroup;
+    private final ChannelGroup channelGroup = new DefaultChannelGroup(GlobalEventExecutor.INSTANCE);
+    private final BaseVoiceServer voiceServer;
+    private NettyUdpKeepAlive keepAlive;
+    private InetSocketAddress socketAddress;
+    public NettyUdpServer(@NotNull BaseVoiceServer voiceServer) {
+        this.voiceServer = voiceServer;
+        ThreadFactory factory = new DefaultThreadFactory("plasmo-voice-udp", Thread.MAX_PRIORITY);
+        this.loopGroup = useEpoll
+                ? new EpollEventLoopGroup(DEFAULT_THREADS, factory)
+                : new NioEventLoopGroup(DEFAULT_THREADS, factory);
+    }
+    @Override
+    public void start(String ip, int port) {
+        this.keepAlive = new NettyUdpKeepAlive(voiceServer);
+        Class<? extends DatagramChannel> channelClass = useEpoll
+                ? EpollDatagramChannel.class
+                : NioDatagramChannel.class;
+        Bootstrap bootstrap = new Bootstrap();
+        bootstrap
+                .group(loopGroup)
+                .channel(channelClass);
+        bootstrap.handler(new ChannelInitializer<DatagramChannel>() {
+            @Override
+            protected void initChannel(@NotNull DatagramChannel ch) throws Exception {
+                ChannelPipeline pipeline = ch.pipeline();
+                pipeline.addLast("flush_consolidation", new FlushConsolidationHandler(256, true));
+                pipeline.addLast("decoder", new NettyPacketUdpDecoder(PacketDirection.SERVER));
+                pipeline.addLast("handler", new NettyPacketHandler(voiceServer));
+                pipeline.addLast("exception_handler", new NettyExceptionHandler());
+            }
+        });
+        boolean reusePortEnabled = false;
+        if (useEpoll && voiceServer.getConfig().voice().reusePort().enabled()) {
+            try {
+                bootstrap.option(UnixChannelOption.SO_REUSEPORT, true);
+                reusePortEnabled = true;
+            } catch (Exception e) {
+                BaseVoice.LOGGER.warn("SO_REUSEPORT not supported on this platform, falling back to single channel");
+            }
+        }
+        try {
+            Channel firstChannel = null;
+            int socketsAmount = reusePortEnabled
+                    ? voiceServer.getConfig().voice().reusePort().sockets()
+                    : 1;
+            if (socketsAmount <= 0) {
+                socketsAmount = Runtime.getRuntime().availableProcessors() * 2;
+            }
+            for (int i = 0; i < socketsAmount; i++) {
+                ChannelFuture channelFuture = bootstrap.bind(ip, port).sync();
+                Channel channel = channelFuture.channel();
+                channelGroup.add(channel);
+                if (firstChannel == null) {
+                    firstChannel = channel;
+                    this.socketAddress = (InetSocketAddress) channel.localAddress();
+                }
+            }
+            if (firstChannel != null) {
+                keepAlive.start(firstChannel);
+            }
+            if (reusePortEnabled && socketsAmount > 1) {
+                BaseVoice.LOGGER.info(
+                        "Bound {} {} UDP server instances with SO_REUSEPORT on {}",
+                        socketsAmount,
+                        channelClass.getSimpleName(),
+                        socketAddress
+                );
+            } else {
+                BaseVoice.LOGGER.info("{} UDP server is started on {}", channelClass.getSimpleName(), socketAddress);
+            }
+        } catch (InterruptedException e) {
+            stop();
+        } catch (Exception e) {
+            stop();
+            throw e;
+        }
+    }
+    @Override
+    public void stop() {
+        voiceServer.getUdpConnectionManager().clearConnections();
+        if (keepAlive != null) keepAlive.close();
+        channelGroup.close();
+        loopGroup.shutdownGracefully();
+        BaseVoice.LOGGER.info("UDP server is stopped");
+    }
+    @Override
+    public Optional<InetSocketAddress> getRemoteAddress() {
+        return Optional.ofNullable(socketAddress);
+    }
+}
+
+===== server\common\src\main\java\su\plo\voice\server\socket\NettyUdpServerConnection.java =====
+@ToString(of = {"channel", "secret", "player", "keepAlive", "sentKeepAlive"})
+public final class NettyUdpServerConnection implements UdpServerConnection, ServerPacketUdpHandler {
+    private final BaseVoiceServer voiceServer;
+    private final DatagramChannel channel;
+    @Getter
+    private InetSocketAddress remoteAddress;
+    @Getter
+    @Setter
+    private InetSocketAddress connectionAddress;
+    @Getter
+    private final UUID secret;
+    @Getter
+    private final VoiceServerPlayer player;
+    @Getter
+    private long keepAlive = System.currentTimeMillis();
+    @Getter
+    @Setter
+    private long sentKeepAlive;
+    @Getter
+    private long lastReceivedPacketTimestamp = System.currentTimeMillis();
+    @Getter
+    private boolean connected = true;
+    public NettyUdpServerConnection(@NotNull BaseVoiceServer voiceServer,
+                                    @NotNull DatagramChannel channel,
+                                    @NotNull UUID secret,
+                                    @NotNull VoiceServerPlayer player) {
+        this.voiceServer = voiceServer;
+        this.channel = channel;
+        this.secret = secret;
+        this.player = player;
+    }
+    @Override
+    public void setRemoteAddress(@NotNull InetSocketAddress remoteAddress) {
+        BaseVoice.DEBUG_LOGGER.log("Set remote address for {} from {} to {}",
+                player.getInstance().getName(),
+                this.remoteAddress, remoteAddress
+        );
+        this.remoteAddress = remoteAddress;
+    }
+    @Override
+    public void sendPacket(Packet<?> packet) {
+        if (voiceServer.getEventBus().hasListener(UdpPacketSendEvent.class)) {
+            UdpPacketSendEvent event = new UdpPacketSendEvent(this, packet);
+            if (!voiceServer.getEventBus().fire(event)) return;
+        }
+        ByteBuf buf = channel.alloc().ioBuffer();
+        try {
+            PacketUdpCodec.encodeThrowing(packet, secret, new ByteBufDataOutput(buf));
+        } catch (Throwable e) {
+            buf.release();
+            BaseVoice.DEBUG_LOGGER.log("Failed to encode packet", e);
+            return;
+        }
+        channel.writeAndFlush(new DatagramPacket(buf, remoteAddress), channel.voidPromise());
+        if (voiceServer.getEventBus().hasListener(UdpPacketSentEvent.class)) {
+            voiceServer.getEventBus().fire(new UdpPacketSentEvent(this, packet));
+        }
+    }
+    @Override
+    public void handlePacket(Packet<ServerPacketUdpHandler> packet) {
+        if (voiceServer.getEventBus().hasListener(UdpPacketReceivedEvent.class)) {
+            UdpPacketReceivedEvent event = new UdpPacketReceivedEvent(this, packet);
+            if (!voiceServer.getEventBus().fire(event)) return;
+        }
+        packet.handle(this);
+        this.lastReceivedPacketTimestamp = System.currentTimeMillis();
+    }
+    @Override
+    public void disconnect() {
+        connected = false;
+        voiceServer.getTcpPacketManager().broadcastPlayerDisconnect(player);
+    }
+    @Override
+    public void handle(@NotNull PingPacket packet) {
+        this.keepAlive = System.currentTimeMillis();
+    }
+    @Override
+    public void handle(@NotNull CustomPacket packet) {
+    }
+    @Override
+    public void handle(@NotNull PlayerAudioPacket packet) {
+        if (voiceServer.getMuteManager().getMute(player.getInstance().getUuid()).isPresent()) return;
+        if (player.isMicrophoneMuted()) return;
+        voiceServer.getEventBus().fire(new PlayerSpeakEvent(player, packet));
+    }
+}
+
+===== api\server\src\main\java\su\plo\voice\api\server\socket\UdpServer.java =====
+/**
+ * Represents a UDP server for handling UDP connections.
+ * <br/>
+ * Implementation of the {@link UdpServer} can be changed by replacing in {@link UdpServerCreateEvent}.
+ */
+public interface UdpServer {
+    /**
+     * Starts the UDP server.
+     *
+     * @param ip   The IP address on which the server should listen.
+     * @param port The port on which the server should listen.
+     */
+    void start(String ip, int port);
+    /**
+     * Stops the UDP server.
+     */
+    void stop();
+    /**
+     * Gets the remote address to which the UDP server is bound.
+     *
+     * @return An optional containing the remote address, or empty if the server is not started yet.
+     */
+    Optional<InetSocketAddress> getRemoteAddress();
+}
+
+===== api\server\src\main\java\su\plo\voice\api\server\socket\UdpServerConnection.java =====
+/**
+ * Identified player UDP connection.
+ */
+public interface UdpServerConnection extends UdpConnection {
+    /**
+     * Gets the {@link VoiceServerPlayer} associated with this connection.
+     *
+     * @return The associated {@link VoiceServerPlayer}.
+     */
+    @NotNull VoiceServerPlayer getPlayer();
+    /**
+     * Gets the timestamp of the last received keep-alive signal from this connection.
+     *
+     * @return The timestamp of the last received keep-alive signal.
+     */
+    long getKeepAlive();
+    /**
+     * Gets the timestamp of the last sent keep-alive signal to this connection.
+     *
+     * @return The timestamp of the last sent keep-alive signal.
+     */
+    long getSentKeepAlive();
+    /**
+     * Sets the timestamp of the last sent keep-alive signal to this connection.
+     *
+     * @param keepAlive The timestamp of the last sent keep-alive signal.
+     */
+    void setSentKeepAlive(long keepAlive);
+    /**
+     * Gets the timestamp of the last received packet from this connection.
+     *
+     * @return The timestamp of the last received packet.
+     */
+    long getLastReceivedPacketTimestamp();
+}
+
+===== server\common\src\main\java\su\plo\voice\server\connection\VoiceUdpServerConnectionManager.java =====
+public final class VoiceUdpServerConnectionManager implements UdpServerConnectionManager {
+    private final BaseVoiceServer voiceServer;
+    private final Map<UUID, UUID> secretByPlayerId = Maps.newConcurrentMap();
+    private final Map<UUID, UUID> playerIdBySecret = Maps.newConcurrentMap();
+    private final Map<UUID, UdpServerConnection> connectionBySecret = Maps.newConcurrentMap();
+    private final Map<UUID, UdpServerConnection> connectionByPlayerId = Maps.newConcurrentMap();
+    public VoiceUdpServerConnectionManager(@NotNull BaseVoiceServer voiceServer) {
+        this.voiceServer = voiceServer;
+        McPlayerQuitEvent.INSTANCE.registerListener(player ->
+                getConnectionByPlayerId(player.getUuid()).ifPresent(connection -> removeConnection(connection, UdpClientDisconnectedEvent.Reason.DISCONNECT))
+        );
+    }
+    @Override
+    public Optional<UUID> getPlayerIdBySecret(@NonNull UUID secret) {
+        return Optional.ofNullable(playerIdBySecret.get(secret));
+    }
+    @Override
+    public @NotNull UUID getSecretByPlayerId(@NonNull UUID playerUUID) {
+        if (secretByPlayerId.containsKey(playerUUID)) {
+            return secretByPlayerId.get(playerUUID);
+        }
+        UUID secret = UUID.randomUUID();
+        secretByPlayerId.put(playerUUID, secret);
+        playerIdBySecret.put(secret, playerUUID);
+        return secret;
+    }
+    @Override
+    public void addConnection(@NonNull UdpServerConnection connection) {
+        UdpClientConnectEvent connectEvent = new UdpClientConnectEvent(connection);
+        if (!voiceServer.getEventBus().fire(connectEvent)) return;
+        UdpServerConnection bySecret = connectionBySecret.put(connection.getSecret(), connection);
+        UdpServerConnection byPlayer = connectionByPlayerId.put(connection.getPlayer().getInstance().getUuid(), connection);
+        if (bySecret != null) bySecret.disconnect();
+        if (byPlayer != null) byPlayer.disconnect();
+        BaseVoice.LOGGER.info("{} ({}) connected", connection.getPlayer().getInstance().getName(), connection.getRemoteAddress());
+        voiceServer.getEventBus().fire(new UdpClientConnectedEvent(connection));
+    }
+    @Override
+    public boolean removeConnection(@NonNull UdpServerConnection connection, @NotNull UdpClientDisconnectedEvent.Reason reason) {
+        UdpServerConnection bySecret = connectionBySecret.remove(connection.getSecret());
+        UdpServerConnection byPlayer = connectionByPlayerId.remove(connection.getPlayer().getInstance().getUuid());
+        if (bySecret != null) disconnect(bySecret, reason);
+        if (byPlayer != null && !byPlayer.equals(bySecret)) disconnect(byPlayer, reason);
+        return bySecret != null || byPlayer != null;
+    }
+    @Override
+    public boolean removeConnection(@NotNull VoiceServerPlayer player, @NotNull UdpClientDisconnectedEvent.Reason reason) {
+        UdpServerConnection connection = connectionByPlayerId.remove(player.getInstance().getUuid());
+        if (connection != null) disconnect(connection, reason);
+        return connection != null;
+    }
+    @Override
+    public boolean removeConnection(@NotNull UUID secret, @NotNull UdpClientDisconnectedEvent.Reason reason) {
+        UdpServerConnection connection = connectionBySecret.remove(secret);
+        if (connection != null) disconnect(connection, reason);
+        return connection != null;
+    }
+    @Override
+    public Optional<UdpServerConnection> getConnectionBySecret(@NotNull UUID secret) {
+        return Optional.ofNullable(connectionBySecret.get(secret));
+    }
+    @Override
+    public Optional<UdpServerConnection> getConnectionByPlayerId(@NotNull UUID playerId) {
+        return Optional.ofNullable(connectionByPlayerId.get(playerId));
+    }
+    @Override
+    public Collection<UdpServerConnection> getConnections() {
+        return connectionByPlayerId.values();
+    }
+    @Override
+    public void clearConnections() {
+        getConnections().forEach(connection -> removeConnection(connection, UdpClientDisconnectedEvent.Reason.DISCONNECT));
+    }
+    private void disconnect(@NotNull UdpServerConnection connection, @NotNull UdpClientDisconnectedEvent.Reason reason) {
+        if (!connection.isConnected()) return;
+        connection.disconnect();
+        VoicePlayer player = connection.getPlayer();
+        secretByPlayerId.remove(player.getInstance().getUuid());
+        playerIdBySecret.remove(connection.getSecret());
+        connectionByPlayerId.remove(player.getInstance().getUuid());
+        connectionBySecret.remove(connection.getSecret());
+        BaseVoice.LOGGER.info("{} disconnected {}", connection.getPlayer().getInstance().getName(), reason);
+        voiceServer.getEventBus().fire(new UdpClientDisconnectedEvent(connection, reason));
+    }
+    @Override
+    public void broadcast(@NotNull Packet<ClientPacketUdpHandler> packet, @Nullable Predicate<VoiceServerPlayer> filter) {
+        for (UdpServerConnection connection : getConnections()) {
+            if (filter == null || filter.test(connection.getPlayer()))
+                connection.sendPacket(packet);
+        }
+    }
+}
+
+===== protocol\src\main\java\su\plo\voice\proto\packets\udp\serverbound\PlayerAudioPacket.java =====
+@NoArgsConstructor
+@ToString
+public final class PlayerAudioPacket extends BaseAudioPacket<ServerPacketUdpHandler> {
+    @Getter
+    private UUID activationId;
+    @Getter
+    private short distance;
+    @Getter
+    private boolean stereo;
+    public PlayerAudioPacket(long sequenceNumber, byte[] data, @NotNull UUID activationId, short distance, boolean stereo) {
+        super(sequenceNumber, data);
+        this.activationId = checkNotNull(activationId);
+        this.distance = distance;
+        this.stereo = stereo;
+    }
+    @Override
+    public void read(ByteArrayDataInput in) throws IOException {
+        super.read(in);
+        this.activationId = PacketUtil.readUUID(in);
+        this.distance = in.readShort();
+        this.stereo = in.readBoolean();
+    }
+    @Override
+    public void write(ByteArrayDataOutput out) throws IOException {
+        super.write(out);
+        PacketUtil.writeUUID(out, checkNotNull(activationId));
+        out.writeShort(distance);
+        out.writeBoolean(stereo);
+    }
+    @Override
+    public void handle(ServerPacketUdpHandler handler) {
+        handler.handle(this);
+    }
+}
+
+===== protocol\src\main\java\su\plo\voice\proto\packets\udp\clientbound\SourceAudioPacket.java =====
+@NoArgsConstructor
+@ToString(callSuper = true)
+public final class SourceAudioPacket extends BaseAudioPacket<ClientPacketUdpHandler> {
+    @Getter
+    private UUID sourceId;
+    @Getter
+    @Setter
+    private byte sourceState;
+    @Getter
+    @Setter
+    private short distance;
+    public SourceAudioPacket(long sequenceNumber, byte sourceState, byte[] data, @NotNull UUID sourceId, short distance) {
+        super(sequenceNumber, data);
+        this.sourceId = sourceId;
+        this.sourceState = sourceState;
+        this.distance = distance;
+    }
+    @Override
+    public void read(ByteArrayDataInput in) throws IOException {
+        super.read(in);
+        this.sourceId = PacketUtil.readUUID(in);
+        this.sourceState = in.readByte();
+        this.distance = in.readShort();
+    }
+    @Override
+    public void write(ByteArrayDataOutput out) throws IOException {
+        super.write(out);
+        PacketUtil.writeUUID(out, checkNotNull(sourceId, "sourceId"));
+        out.writeByte(sourceState);
+        out.writeShort(distance);
+    }
+    @Override
+    public void handle(ClientPacketUdpHandler handler) {
+        handler.handle(this);
+    }
+}
+
+===== protocol\src\main\java\su\plo\voice\proto\packets\udp\clientbound\SelfAudioInfoPacket.java =====
+@AllArgsConstructor
+@NoArgsConstructor
+@ToString
+public final class SelfAudioInfoPacket implements Packet<ClientPacketUdpHandler> {
+    @Getter
+    private UUID sourceId;
+    @Getter
+    private long sequenceNumber;
+    private byte[] data;
+    @Getter
+    private short distance;
+    /**
+     * Returns data only if it has been changed on the server.
+     */
+    public Optional<byte[]> getData() {
+        return Optional.ofNullable(data);
+    }
+    @Override
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.sourceId = PacketUtil.readUUID(in);
+        this.sequenceNumber = in.readLong();
+        if (in.readBoolean()) {
+            int length = PacketUtil.readSafeInt(in, 1, 2048);
+            byte[] data = new byte[length];
+            in.readFully(data);
+            this.data = data;
+        }
+        this.distance = in.readShort();
+    }
+    @Override
+    public void write(ByteArrayDataOutput out) throws IOException {
+        PacketUtil.writeUUID(out, checkNotNull(sourceId, "sourceId"));
+        out.writeLong(sequenceNumber);
+        out.writeBoolean(data != null);
+        if (data != null) {
+            out.writeInt(data.length);
+            out.write(data);
+        }
+        out.writeShort(distance);
+    }
+    @Override
+    public void handle(ClientPacketUdpHandler handler) {
+        handler.handle(this);
+    }
+}
+
+===== protocol\src\main\java\su\plo\voice\proto\packets\udp\bothbound\CustomPacket.java =====
+@NoArgsConstructor
+@AllArgsConstructor
+@ToString
+public class CustomPacket implements Packet<PacketUdpHandler> {
+    @Getter
+    private String addonId;
+    @Getter
+    private byte[] payload;
+    @Override
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.addonId = in.readUTF();
+    }
+    @Override
+    public void write(ByteArrayDataOutput out) throws IOException {
+        checkNotNull(addonId, "addonId cannot be null");
+        checkNotNull(payload, "payload cannot be null");
+        out.writeUTF(addonId);
+        out.writeInt(payload.length);
+        out.write(payload);
+    }
+    @Override
+    public void handle(PacketUdpHandler handler) {
+        handler.handle(this);
+    }
+}
+
+===== protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\ConfigPacket.java =====
+@NoArgsConstructor
+@ToString
+public final class ConfigPacket extends ConfigPlayerInfoPacket {
+    @Getter
+    private UUID serverId;
+    @Getter
+    private CaptureInfo captureInfo;
+    @Getter
+    private @Nullable EncryptionInfo encryption;
+    private Set<VoiceSourceLine> sourceLines;
+    private Set<VoiceActivation> activations;
+    @Getter
+    private PlayerIconConfig playerIconConfig;
+    public ConfigPacket(
+            @NotNull UUID serverId,
+            @NotNull CaptureInfo captureInfo,
+            @Nullable EncryptionInfo encryption,
+            @NotNull Set<VoiceSourceLine> sourceLines,
+            @NotNull Set<VoiceActivation> activations,
+            @NotNull Map<String, Boolean> permissions,
+            @NotNull PlayerIconConfig playerIconConfig
+    ) {
+        super(permissions);
+        this.serverId = serverId;
+        this.captureInfo = captureInfo;
+        this.encryption = encryption;
+        this.sourceLines = sourceLines;
+        this.activations = activations;
+        this.playerIconConfig = playerIconConfig;
+    }
+    public Collection<VoiceSourceLine> getSourceLines() {
+        return sourceLines;
+    }
+    public Collection<VoiceActivation> getActivations() {
+        return activations;
+    }
+    @Override
+    public void read(ByteArrayDataInput in) throws IOException {
+        this.serverId = PacketUtil.readUUID(in);
+        this.captureInfo = new CaptureInfo();
+        captureInfo.deserialize(in);
+        if (in.readBoolean()) {
+            this.encryption = new EncryptionInfo();
+            encryption.deserialize(in);
+        }
+        // source lines
+        this.sourceLines = Sets.newHashSet();
+        int size = PacketUtil.readSafeInt(in, 0, Byte.MAX_VALUE);
+        for (int i = 0; i < size; i++) {
+            VoiceSourceLine sourceLine = new VoiceSourceLine();
+            sourceLine.deserialize(in);
+            sourceLines.add(sourceLine);
+        }
+        // activations
+        this.activations = Sets.newHashSet();
+        size = PacketUtil.readSafeInt(in, 0, Byte.MAX_VALUE);
+        for (int i = 0; i < size; i++) {
+            VoiceActivation activation = new VoiceActivation();
+            activation.deserialize(in);
+            activations.add(activation);
+        }
+        super.read(in);
+        // since 2.1.7
+        // because server can be still on 2.1.6, we have to implement some kind of fallback mechanics here
+        try {
+            this.playerIconConfig = new PlayerIconConfig();
+            playerIconConfig.deserialize(in);
+        } catch (Exception ignored) {
+        }
+    }
+    @Override
+    public void write(ByteArrayDataOutput out) throws IOException {
+        PacketUtil.writeUUID(out, serverId);
+        checkNotNull(captureInfo).serialize(out);
+        out.writeBoolean(encryption != null);
+        if (encryption != null) {
+            encryption.serialize(out);
+        }
+        // source lines
+        out.writeInt(sourceLines.size());
+        for (VoiceSourceLine sourceLine : sourceLines) {
+            sourceLine.serialize(out);
+        }
+        // activations
+        out.writeInt(activations.size());
+        activations.forEach(activation -> activation.serialize(out));
+        super.write(out);
+        // since 2.1.7
+        playerIconConfig.serialize(out);
+    }
+    @Override
+    public void handle(ClientPacketTcpHandler handler) {
+        handler.handle(this);
+    }
+}
+
+===== protocol\src\main\java\su\plo\voice\proto\data\audio\capture\CodecInfo.java =====
+(MISSING)
+
+===== protocol\src\main\java\su\plo\voice\proto\data\audio\capture\CaptureInfo.java =====
+@AllArgsConstructor
+@NoArgsConstructor
+@ToString
+public final class CaptureInfo implements PacketSerializable {
+    @Getter
+    private int sampleRate;
+    @Getter
+    private int mtuSize;
+    @Getter
+    private CodecInfo encoderInfo;
+    @Override
+    public void deserialize(ByteArrayDataInput in) throws IOException {
+        this.sampleRate = in.readInt();
+        this.mtuSize = in.readInt();
+        if (in.readBoolean()) {
+            this.encoderInfo = new CodecInfo();
+            encoderInfo.deserialize(in);
+        }
+    }
+    @Override
+    public void serialize(ByteArrayDataOutput out) {
+        out.writeInt(sampleRate);
+        out.writeInt(mtuSize);
+        out.writeBoolean(encoderInfo != null);
+        if (encoderInfo != null) encoderInfo.serialize(out);
+    }
+}
+

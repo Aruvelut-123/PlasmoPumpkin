@@ -1,0 +1,406 @@
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\ActivationRegisterPacket.java =====
+  F  private VoiceActivation activation;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     this.activation = new VoiceActivation();
+     activation.deserialize(in);
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     checkNotNull(activation).serialize(out);
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\ActivationUnregisterPacket.java =====
+  F  private UUID activationId;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     this.activationId = PacketUtil.readUUID(in);
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     PacketUtil.writeUUID(out, checkNotNull(activationId));
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\AnimatedActionBarPacket.java =====
+  F  private String jsonComponent;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     this.jsonComponent = in.readUTF();
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     out.writeUTF(checkNotNull(jsonComponent));;
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\ConfigPacket.java =====
+  F  private UUID serverId;
+  F  private CaptureInfo captureInfo;
+  F  private @Nullable EncryptionInfo encryption;
+  F  private Set<VoiceSourceLine> sourceLines;
+  F  private Set<VoiceActivation> activations;
+  F  private PlayerIconConfig playerIconConfig;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     this.serverId = PacketUtil.readUUID(in);
+     this.captureInfo = new CaptureInfo();
+     captureInfo.deserialize(in);
+     if (in.readBoolean()) {
+     this.encryption = new EncryptionInfo();
+     encryption.deserialize(in);
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     PacketUtil.writeUUID(out, serverId);
+     checkNotNull(captureInfo).serialize(out);
+     out.writeBoolean(encryption != null);
+     if (encryption != null) {
+     encryption.serialize(out);
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\ConfigPlayerInfoPacket.java =====
+  F  private Map<String, Boolean> permissions = new HashMap<>();
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     int size = PacketUtil.readSafeInt(in, 0, Byte.MAX_VALUE);
+     for (int i = 0; i < size; i++) {
+     String key = in.readUTF();
+     boolean value = in.readBoolean();
+     permissions.put(key, value);
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     out.writeInt(permissions.size());
+     permissions.forEach((permission, value) -> {
+     out.writeUTF(permission);
+     out.writeBoolean(value);
+     });
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\ConnectionPacket.java =====
+  F  private UUID secret;
+  F  private String ip;
+  F  private int port;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     this.secret = PacketUtil.readUUID(in);
+     this.ip = in.readUTF();
+     this.port = in.readInt();
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     checkNotNull(secret, "secret cannot be null");
+     checkNotNull(ip, "ip cannot be null");
+     PacketUtil.writeUUID(out, secret);
+     out.writeUTF(ip);
+     out.writeInt(port);
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\DistanceVisualizePacket.java =====
+  F  private int radius;
+  F  private int hexColor;
+  F  private @Nullable Pos3d position;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     this.radius = in.readInt();
+     this.hexColor = in.readInt();
+     this.position = PacketUtil.readNullable(in, Pos3dSerializer.INSTANCE);
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     out.writeInt(radius);
+     out.writeInt(hexColor);
+     PacketUtil.writeNullable(out, Pos3dSerializer.INSTANCE, position);
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\LanguagePacket.java =====
+  F  private String languageName;
+  F  private Map<String, String> language;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     this.languageName = in.readUTF();
+     this.language = Maps.newHashMap();
+     int size = PacketUtil.readSafeInt(in, 0, Short.MAX_VALUE);
+     for (int i = 0; i < size; i++) {
+     String key = in.readUTF();
+     String value = in.readUTF();
+     language.put(key, value);
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     out.writeUTF(checkNotNull(languageName));
+     if (language.size() > Short.MAX_VALUE) {
+     throw new IllegalArgumentException("Language size is too big");
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\PlayerDisconnectPacket.java =====
+  F  private UUID playerId;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     this.playerId = PacketUtil.readUUID(in);
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     PacketUtil.writeUUID(out, checkNotNull(playerId));
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\PlayerInfoRequestPacket.java =====
+  F  private VoicePlayerInfo playerInfo;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\PlayerInfoUpdatePacket.java =====
+  F  private VoicePlayerInfo playerInfo;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     this.playerInfo = new VoicePlayerInfo();
+     playerInfo.deserialize(in);
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     playerInfo.serialize(out);
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\PlayerListPacket.java =====
+  F  private List<VoicePlayerInfo> players;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     int size = PacketUtil.readSafeInt(in, 0, Short.MAX_VALUE);
+     this.players = new ArrayList<>(size);
+     for (int i = 0; i < size; i++) {
+     VoicePlayerInfo player = new VoicePlayerInfo();
+     player.deserialize(in);
+     players.add(player);
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     checkNotNull(players, "players");
+     out.writeInt(players.size());
+     for (VoicePlayerInfo player : players) player.serialize(out);
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\SelfSourceInfoPacket.java =====
+  F  private SelfSourceInfo sourceInfo;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     this.sourceInfo = new SelfSourceInfo();
+     sourceInfo.deserialize(in);
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     checkNotNull(this.sourceInfo, "sourceInfo").serialize(out);
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\SourceAudioEndPacket.java =====
+  F  private UUID sourceId;
+  F  private long sequenceNumber;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     this.sourceId = PacketUtil.readUUID(in);
+     this.sequenceNumber = in.readLong();
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     PacketUtil.writeUUID(out, checkNotNull(sourceId));
+     out.writeLong(sequenceNumber);
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\SourceInfoPacket.java =====
+  F  private SourceInfo sourceInfo;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     this.sourceInfo = SourceInfo.of(in);
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     checkNotNull(sourceInfo).serialize(out);
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\SourceLinePlayerAddPacket.java =====
+  F  private UUID lineId;
+  F  private McGameProfile player;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     this.lineId = PacketUtil.readUUID(in);
+     this.player = McGameProfileSerializer.INSTANCE.deserialize(in);
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     PacketUtil.writeUUID(out, checkNotNull(lineId));
+     McGameProfileSerializer.INSTANCE.serialize(checkNotNull(player), out);
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\SourceLinePlayerRemovePacket.java =====
+  F  private UUID lineId;
+  F  private UUID playerId;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     this.lineId = PacketUtil.readUUID(in);
+     this.playerId = PacketUtil.readUUID(in);
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     PacketUtil.writeUUID(out, checkNotNull(lineId));
+     PacketUtil.writeUUID(out, checkNotNull(playerId));
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\SourceLinePlayersListPacket.java =====
+  F  private UUID lineId;
+  F  private List<McGameProfile> players;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     this.lineId = PacketUtil.readUUID(in);
+     this.players = PacketUtil.readList(in, McGameProfileSerializer.INSTANCE);
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     PacketUtil.writeUUID(out, checkNotNull(lineId));
+     PacketUtil.writeList(out, McGameProfileSerializer.INSTANCE, checkNotNull(players));
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\SourceLineRegisterPacket.java =====
+  F  private VoiceSourceLine sourceLine;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     this.sourceLine = new VoiceSourceLine();
+     sourceLine.deserialize(in);
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     checkNotNull(sourceLine).serialize(out);
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\SourceLineUnregisterPacket.java =====
+  F  private UUID lineId;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     this.lineId = PacketUtil.readUUID(in);
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     PacketUtil.writeUUID(out, checkNotNull(lineId));
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\serverbound\LanguageRequestPacket.java =====
+  F  private String language;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     this.language = PacketUtil.readSafeUTF(in, 32);
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     out.writeUTF(checkNotNull(language));
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\serverbound\PlayerActivationDistancesPacket.java =====
+  F  private Map<UUID, Integer> distanceByActivationId;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     this.distanceByActivationId = Maps.newHashMap();
+     int size = PacketUtil.readSafeInt(in, 0, Byte.MAX_VALUE);
+     for (int i = 0; i < size; i++) {
+     distanceByActivationId.put(PacketUtil.readUUID(in), in.readInt());
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     out.writeInt(checkNotNull(distanceByActivationId).size());
+     distanceByActivationId.forEach((activationId, distance) -> {
+     PacketUtil.writeUUID(out, activationId);
+     out.writeInt(distance);
+     });
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\serverbound\PlayerAudioEndPacket.java =====
+  F  private long sequenceNumber;
+  F  private UUID activationId;
+  F  private short distance;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     this.sequenceNumber = in.readLong();
+     this.activationId = PacketUtil.readUUID(in);
+     this.distance = in.readShort();
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     out.writeLong(sequenceNumber);
+     PacketUtil.writeUUID(out, checkNotNull(activationId));
+     out.writeShort(distance);
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\serverbound\PlayerInfoPacket.java =====
+  F  private String minecraftVersion;
+  F  private String version;
+  F  private byte[] publicKey;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     super.read(in);
+     this.minecraftVersion = PacketUtil.readSafeUTF(in, 64);
+     this.version = PacketUtil.readSafeUTF(in, 64);
+     int length = PacketUtil.readSafeInt(in, 1, 2048);
+     this.publicKey = new byte[length];
+     in.readFully(publicKey);
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     super.write(out);
+     out.writeUTF(checkNotNull(minecraftVersion));
+     out.writeUTF(checkNotNull(version));
+     checkNotNull(publicKey);
+     out.writeInt(publicKey.length);
+     out.write(publicKey);
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\serverbound\PlayerStatePacket.java =====
+  F  private boolean voiceDisabled;
+  F  private boolean microphoneMuted;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     this.voiceDisabled = in.readBoolean();
+     this.microphoneMuted = in.readBoolean();
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     out.writeBoolean(voiceDisabled);
+     out.writeBoolean(microphoneMuted);
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\serverbound\SourceInfoRequestPacket.java =====
+  F  private UUID sourceId;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     this.sourceId = PacketUtil.readUUID(in);
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     PacketUtil.writeUUID(out, checkNotNull(sourceId));
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\clientbound\SelfAudioInfoPacket.java =====
+  F  private UUID sourceId;
+  F  private long sequenceNumber;
+  F  private byte[] data;
+  F  private short distance;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     this.sourceId = PacketUtil.readUUID(in);
+     this.sequenceNumber = in.readLong();
+     if (in.readBoolean()) {
+     int length = PacketUtil.readSafeInt(in, 1, 2048);
+     byte[] data = new byte[length];
+     in.readFully(data);
+     this.data = data;
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     PacketUtil.writeUUID(out, checkNotNull(sourceId, "sourceId"));
+     out.writeLong(sequenceNumber);
+     out.writeBoolean(data != null);
+     if (data != null) {
+     out.writeInt(data.length);
+     out.write(data);
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\clientbound\SourceAudioPacket.java =====
+  F  private UUID sourceId;
+  F  private byte sourceState;
+  F  private short distance;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     super.read(in);
+     this.sourceId = PacketUtil.readUUID(in);
+     this.sourceState = in.readByte();
+     this.distance = in.readShort();
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     super.write(out);
+     PacketUtil.writeUUID(out, checkNotNull(sourceId, "sourceId"));
+     out.writeByte(sourceState);
+     out.writeShort(distance);
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\serverbound\PlayerAudioPacket.java =====
+  F  private UUID activationId;
+  F  private short distance;
+  F  private boolean stereo;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     super.read(in);
+     this.activationId = PacketUtil.readUUID(in);
+     this.distance = in.readShort();
+     this.stereo = in.readBoolean();
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     super.write(out);
+     PacketUtil.writeUUID(out, checkNotNull(activationId));
+     out.writeShort(distance);
+     out.writeBoolean(stereo);
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\bothbound\BaseAudioPacket.java =====
+  F  protected long sequenceNumber;
+  F  protected byte[] data;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     this.sequenceNumber = in.readLong();
+     int length = PacketUtil.readSafeInt(in, 1, 2048);
+     byte[] data = new byte[length];
+     in.readFully(data);
+     this.data = data;
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     out.writeLong(sequenceNumber);
+     out.writeInt(data.length);
+     out.write(data);
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\bothbound\CustomPacket.java =====
+  F  private String addonId;
+  F  private byte[] payload;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     this.addonId = in.readUTF();
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     checkNotNull(addonId, "addonId cannot be null");
+     checkNotNull(payload, "payload cannot be null");
+     out.writeUTF(addonId);
+     out.writeInt(payload.length);
+     out.write(payload);
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\bothbound\PingPacket.java =====
+  F  private long time = System.currentTimeMillis();
+  F  private String serverIp;
+  F  private int serverPort;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+     this.time = in.readLong();
+     try {
+     this.serverIp = PacketUtil.readSafeUTF(in, 255);
+     this.serverPort = in.readUnsignedShort();
+     } catch (Exception ignored) {
+     }
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+     out.writeLong(time);
+     if (serverIp != null && serverPort > 0) {
+     out.writeUTF(serverIp);
+     out.writeShort(serverPort);
+     }
+===== C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\Packet.java =====
+  >> void read(ByteArrayDataInput in) throws IOException;
+  >> void write(ByteArrayDataOutput out) throws IOException;
+     void handle(T handler);
+     }

@@ -1,0 +1,14 @@
+[package]
+name = "plasmo-voice-core"
+version = "0.1.0"
+edition = "2021"
+description = "Pure Rust wire-format core for the Plasmo Voice protocol (UDP/TCP codecs, packet types, data models)"
+license = "MIT"
+
+[dependencies]
+bytes = "1.0"
+uuid = { version = "1.0", features = ["serde", "v4"] }
+thiserror = "1.0"
+log = "0.4"
+
+[dev-dependencies]

@@ -1,0 +1,470 @@
+﻿
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\audio\capture\Activation.java
+public interface Activation {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\audio\capture\CaptureInfo.java
+public final class CaptureInfo implements PacketSerializable {
+private int sampleRate;
+private int mtuSize;
+private CodecInfo encoderInfo;
+  >> public void deserialize(ByteArrayDataInput in) throws IOException {
+  >> public void serialize(ByteArrayDataOutput out) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\audio\capture\VoiceActivation.java
+public class VoiceActivation implements Activation, PacketSerializable {
+public static final String PROXIMITY_NAME = "proximity";
+public static final UUID PROXIMITY_ID = generateId(PROXIMITY_NAME);
+  -- public static UUID generateId(@NotNull String name) {
+protected UUID id;
+protected String name;
+protected String translation;
+protected String icon;
+protected List<Integer> distances = ImmutableList.of();
+protected int defaultDistance;
+protected boolean proximity;
+protected boolean transitive;
+protected boolean stereoSupported;
+protected @Nullable CodecInfo encoderInfo;
+protected int weight;
+  -- public List<Integer> getDistances() {
+  -- public int getMinDistance() {
+  -- public int getMaxDistance() {
+  -- public Optional<CodecInfo> getEncoderInfo() {
+  >> public void deserialize(ByteArrayDataInput in) throws IOException {
+  >> public void serialize(ByteArrayDataOutput out) {
+  -- protected static int validateDefaultDistance(@NotNull List<Integer> distances, int defaultDistance) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\audio\codec\CodecInfo.java
+public class CodecInfo implements PacketSerializable {
+protected String name;
+protected Map<String, String> params;
+  >> public void deserialize(ByteArrayDataInput in) throws IOException {
+  >> public void serialize(ByteArrayDataOutput out) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\audio\line\SourceLine.java
+public interface SourceLine {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\audio\line\VoiceSourceLine.java
+public class VoiceSourceLine implements SourceLine, PacketSerializable {
+public static final String PROXIMITY_NAME = "proximity";
+public static final UUID PROXIMITY_ID = generateId(PROXIMITY_NAME);
+  -- public static UUID generateId(@NotNull String name) {
+protected UUID id;
+protected String name;
+protected String translation;
+protected String icon;
+protected double defaultVolume;
+protected int weight;
+protected Set<McGameProfile> players = null;
+  >> public void deserialize(ByteArrayDataInput in) throws IOException {
+  >> public void serialize(ByteArrayDataOutput out) throws IOException {
+  -- public boolean hasPlayers() {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\audio\source\DirectSourceInfo.java
+public final class DirectSourceInfo extends SourceInfo {
+private @Nullable McGameProfile sender;
+private boolean cameraRelative = true;
+  >> public void deserialize(ByteArrayDataInput in) throws IOException {
+  >> public void serialize(ByteArrayDataOutput out) throws IOException {
+  -- public Type getType() {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\audio\source\EntitySourceInfo.java
+public final class EntitySourceInfo extends SourceInfo {
+private int entityId;
+  >> public void deserialize(ByteArrayDataInput in) throws IOException {
+  >> public void serialize(ByteArrayDataOutput out) throws IOException {
+  -- public Type getType() {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\audio\source\PlayerSourceInfo.java
+public final class PlayerSourceInfo extends SourceInfo {
+private VoicePlayerInfo playerInfo;
+  >> public void deserialize(ByteArrayDataInput in) throws IOException {
+  >> public void serialize(ByteArrayDataOutput out) throws IOException {
+  -- public Type getType() {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\audio\source\SelfSourceInfo.java
+public class SelfSourceInfo implements PacketSerializable {
+private SourceInfo sourceInfo;
+private UUID playerId;
+private UUID activationId;
+private long sequenceNumber;
+  >> public void deserialize(ByteArrayDataInput in) throws IOException {
+  >> public void serialize(ByteArrayDataOutput out) throws IOException {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\audio\source\SourceInfo.java
+public abstract class SourceInfo implements PacketSerializable {
+  -- public static SourceInfo of(ByteArrayDataInput in) throws IOException {
+protected String addonId;
+protected UUID id;
+protected UUID lineId;
+protected @Nullable String name;
+protected byte state;
+protected @Nullable CodecInfo decoderInfo;
+protected boolean stereo;
+protected boolean iconVisible;
+protected int angle;
+  >> public void deserialize(ByteArrayDataInput in) throws IOException {
+  >> public void serialize(ByteArrayDataOutput out) throws IOException {
+public enum Type {
+private final Supplier<SourceInfo> sourceInfoSupplier;
+  -- public SourceInfo createSourceInfo() {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\audio\source\StaticSourceInfo.java
+public final class StaticSourceInfo extends SourceInfo {
+  >> public void deserialize(ByteArrayDataInput in) throws IOException {
+  >> public void serialize(ByteArrayDataOutput out) throws IOException {
+  -- public Type getType() {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\encryption\EncryptionInfo.java
+public final class EncryptionInfo implements PacketSerializable {
+private String algorithm;
+private byte[] data;
+  >> public void deserialize(ByteArrayDataInput in) throws IOException {
+  >> public void serialize(ByteArrayDataOutput out) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\data\player\VoicePlayerInfo.java
+public class VoicePlayerInfo implements PacketSerializable {
+private UUID playerId;
+private String playerNick;
+private boolean muted;
+private boolean voiceDisabled;
+private boolean microphoneMuted;
+  >> public void deserialize(ByteArrayDataInput in) {
+  >> public void serialize(ByteArrayDataOutput out) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\Packet.java
+public interface Packet<T extends PacketHandler> {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\PacketHandler.java
+public interface PacketHandler {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\PacketRegistry.java
+public class PacketRegistry {
+  -- public Packet<?> byType(int type) {
+  -- public Packet<?> byType(int type, @NotNull PacketDirection direction) {
+  -- public int getType(Packet<?> packet) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\PacketSerializable.java
+public interface PacketSerializable {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\PacketUtil.java
+public class PacketUtil {
+  -- public static int readSafeInt(ByteArrayDataInput in, int minInt, int maxInt) throws IOException {
+  -- public static String readSafeUTF(ByteArrayDataInput in, int maxLength) throws IOException {
+  -- public static void writeBytes(ByteArrayDataOutput out, byte[] bytes) {
+  -- public static byte[] readBytes(ByteArrayDataInput in, int max) throws IOException {
+  -- public static void writeUUID(ByteArrayDataOutput out, UUID uuid) {
+  -- public static UUID readUUID(ByteArrayDataInput in) {
+  -- public static byte[] getUUIDBytes(UUID uuid) {
+  -- public static void writeUUIDList(ByteArrayDataOutput out, List<UUID> uuids) {
+  -- public static List<UUID> readUUIDList(ByteArrayDataInput in) {
+  -- public static void writeIntList(ByteArrayDataOutput out, List<Integer> list) {
+  -- public static List<Integer> readIntList(ByteArrayDataInput in) throws IOException {
+  -- public static List<Integer> readIntList(ByteArrayDataInput in, int maxSize) throws IOException {
+  -- public static void writeNullableString(ByteArrayDataOutput out, @Nullable String str) {
+  -- public static @Nullable String readNullableString(ByteArrayDataInput in) {
+  -- public static <T> List<T> readList(@NotNull ByteArrayDataInput buffer, @NotNull PacketSerializer<T> serializer) throws IOException {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\ActivationRegisterPacket.java
+public final class ActivationRegisterPacket implements Packet<ClientPacketTcpHandler> {
+private VoiceActivation activation;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ClientPacketTcpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\ActivationUnregisterPacket.java
+public final class ActivationUnregisterPacket implements Packet<ClientPacketTcpHandler> {
+private UUID activationId;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ClientPacketTcpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\AnimatedActionBarPacket.java
+public class AnimatedActionBarPacket implements Packet<ClientPacketTcpHandler> {
+private String jsonComponent;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ClientPacketTcpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\ClientPacketTcpHandler.java
+public interface ClientPacketTcpHandler extends PacketTcpHandler {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\ConfigPacket.java
+public final class ConfigPacket extends ConfigPlayerInfoPacket {
+private UUID serverId;
+private CaptureInfo captureInfo;
+private @Nullable EncryptionInfo encryption;
+private Set<VoiceSourceLine> sourceLines;
+private Set<VoiceActivation> activations;
+private PlayerIconConfig playerIconConfig;
+  -- public Collection<VoiceSourceLine> getSourceLines() {
+  -- public Collection<VoiceActivation> getActivations() {
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ClientPacketTcpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\ConfigPlayerInfoPacket.java
+public class ConfigPlayerInfoPacket implements Packet<ClientPacketTcpHandler> {
+private Map<String, Boolean> permissions = new HashMap<>();
+  -- public ConfigPlayerInfoPacket(@NotNull Map<String, Boolean> permissions) {
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ClientPacketTcpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\ConnectionPacket.java
+public final class ConnectionPacket implements Packet<ClientPacketTcpHandler> {
+private UUID secret;
+private String ip;
+private int port;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ClientPacketTcpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\DistanceVisualizePacket.java
+public final class DistanceVisualizePacket implements Packet<ClientPacketTcpHandler> {
+private int radius;
+private int hexColor;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ClientPacketTcpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\LanguagePacket.java
+public final class LanguagePacket implements Packet<ClientPacketTcpHandler> {
+private String languageName;
+private Map<String, String> language;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ClientPacketTcpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\PlayerDisconnectPacket.java
+public final class PlayerDisconnectPacket implements Packet<ClientPacketTcpHandler> {
+private UUID playerId;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ClientPacketTcpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\PlayerInfoRequestPacket.java
+public final class PlayerInfoRequestPacket implements Packet<ClientPacketTcpHandler> {
+private VoicePlayerInfo playerInfo;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ClientPacketTcpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\PlayerInfoUpdatePacket.java
+public final class PlayerInfoUpdatePacket implements Packet<ClientPacketTcpHandler> {
+private VoicePlayerInfo playerInfo;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ClientPacketTcpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\PlayerListPacket.java
+public final class PlayerListPacket implements Packet<ClientPacketTcpHandler> {
+private List<VoicePlayerInfo> players;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ClientPacketTcpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\SelfSourceInfoPacket.java
+public final class SelfSourceInfoPacket implements Packet<ClientPacketTcpHandler> {
+private SelfSourceInfo sourceInfo;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ClientPacketTcpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\SourceAudioEndPacket.java
+public final class SourceAudioEndPacket implements Packet<ClientPacketTcpHandler> {
+private UUID sourceId;
+private long sequenceNumber;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ClientPacketTcpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\SourceInfoPacket.java
+public final class SourceInfoPacket implements Packet<ClientPacketTcpHandler> {
+private SourceInfo sourceInfo;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ClientPacketTcpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\SourceLinePlayerAddPacket.java
+public final class SourceLinePlayerAddPacket implements Packet<ClientPacketTcpHandler> {
+private UUID lineId;
+private McGameProfile player;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ClientPacketTcpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\SourceLinePlayerRemovePacket.java
+public final class SourceLinePlayerRemovePacket implements Packet<ClientPacketTcpHandler> {
+private UUID lineId;
+private UUID playerId;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ClientPacketTcpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\SourceLinePlayersListPacket.java
+public final class SourceLinePlayersListPacket implements Packet<ClientPacketTcpHandler> {
+private UUID lineId;
+private List<McGameProfile> players;
+  -- public SourceLinePlayersListPacket(@NotNull UUID lineId) {
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ClientPacketTcpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\SourceLineRegisterPacket.java
+public final class SourceLineRegisterPacket implements Packet<ClientPacketTcpHandler> {
+private VoiceSourceLine sourceLine;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ClientPacketTcpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\clientbound\SourceLineUnregisterPacket.java
+public final class SourceLineUnregisterPacket implements Packet<ClientPacketTcpHandler> {
+private UUID lineId;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ClientPacketTcpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\PacketTcpCodec.java
+public class PacketTcpCodec {
+private static final PacketRegistry PACKETS = new PacketRegistry();
+  -- public static byte[] encode(Packet<?> packet) {
+  -- public static <T extends PacketHandler> Optional<Packet<T>> decode(ByteArrayDataInput buf) throws IOException {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\PacketTcpHandler.java
+public interface PacketTcpHandler extends PacketHandler {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\serverbound\LanguageRequestPacket.java
+public final class LanguageRequestPacket implements Packet<ServerPacketTcpHandler> {
+private String language;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ServerPacketTcpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\serverbound\PlayerActivationDistancesPacket.java
+public final class PlayerActivationDistancesPacket implements Packet<ServerPacketTcpHandler> {
+private Map<UUID, Integer> distanceByActivationId;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ServerPacketTcpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\serverbound\PlayerAudioEndPacket.java
+public final class PlayerAudioEndPacket implements Packet<ServerPacketTcpHandler> {
+private long sequenceNumber;
+private UUID activationId;
+private short distance;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ServerPacketTcpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\serverbound\PlayerInfoPacket.java
+public final class PlayerInfoPacket extends PlayerStatePacket {
+private String minecraftVersion;
+private String version;
+private byte[] publicKey;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ServerPacketTcpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\serverbound\PlayerStatePacket.java
+public class PlayerStatePacket implements Packet<ServerPacketTcpHandler> {
+private boolean voiceDisabled;
+private boolean microphoneMuted;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ServerPacketTcpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\serverbound\ServerPacketTcpHandler.java
+public interface ServerPacketTcpHandler extends PacketTcpHandler {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\tcp\serverbound\SourceInfoRequestPacket.java
+public class SourceInfoRequestPacket implements Packet<ServerPacketTcpHandler> {
+private UUID sourceId;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ServerPacketTcpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\bothbound\BaseAudioPacket.java
+public abstract class BaseAudioPacket<T extends PacketHandler> implements Packet<T> {
+protected long sequenceNumber;
+protected byte[] data;
+  -- public BaseAudioPacket(long sequenceNumber, byte[] data) {
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\bothbound\CustomPacket.java
+public class CustomPacket implements Packet<PacketUdpHandler> {
+private String addonId;
+private byte[] payload;
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(PacketUdpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\bothbound\PingPacket.java
+public class PingPacket implements Packet<PacketUdpHandler> {
+private long time = System.currentTimeMillis();
+private String serverIp;
+private int serverPort;
+  -- public PingPacket(@NotNull String serverIp, int serverPort) {
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(PacketUdpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\clientbound\ClientPacketUdpHandler.java
+public interface ClientPacketUdpHandler extends PacketUdpHandler {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\clientbound\SelfAudioInfoPacket.java
+public final class SelfAudioInfoPacket implements Packet<ClientPacketUdpHandler> {
+private UUID sourceId;
+private long sequenceNumber;
+private byte[] data;
+private short distance;
+  -- public Optional<byte[]> getData() {
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ClientPacketUdpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\clientbound\SourceAudioPacket.java
+public final class SourceAudioPacket extends BaseAudioPacket<ClientPacketUdpHandler> {
+private UUID sourceId;
+private byte sourceState;
+private short distance;
+  -- public SourceAudioPacket(long sequenceNumber, byte sourceState, byte[] data, @NotNull UUID sourceId, short distance) {
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ClientPacketUdpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\PacketUdp.java
+public class PacketUdp {
+private final UUID secret;
+private final long timestamp;
+private ByteArrayDataInput input;
+private boolean read;
+public Class<?> getPacketClass() {
+  -- public Packet<?> getPacketUntyped() throws IOException {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\PacketUdpCodec.java
+public class PacketUdpCodec {
+private static final int MAGIC_NUMBER = 0x4e9004e9;
+private static final PacketRegistry PACKETS = new PacketRegistry();
+  -- public static byte[] replaceSecret(byte[] data, UUID secret) {
+  -- public static byte[] encodeThrowing(@NotNull Packet<?> packet, @NotNull UUID secret) throws IOException {
+  -- public static byte[] encode(@NotNull Packet<?> packet, @NotNull UUID secret) {
+  -- public static Optional<PacketUdp> decode(ByteArrayDataInput in) throws IOException {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\PacketUdpHandler.java
+public interface PacketUdpHandler extends PacketHandler {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\serverbound\PlayerAudioPacket.java
+public final class PlayerAudioPacket extends BaseAudioPacket<ServerPacketUdpHandler> {
+private UUID activationId;
+private short distance;
+private boolean stereo;
+  -- public PlayerAudioPacket(long sequenceNumber, byte[] data, @NotNull UUID activationId, short distance, boolean stereo) {
+  >> public void read(ByteArrayDataInput in) throws IOException {
+  >> public void write(ByteArrayDataOutput out) throws IOException {
+  -- public void handle(ServerPacketUdpHandler handler) {
+
+#### C:\Users\Baymaxawa\AppData\Local\Temp\pv\plasmo-voice\protocol\src\main\java\su\plo\voice\proto\packets\udp\serverbound\ServerPacketUdpHandler.java
+public interface ServerPacketUdpHandler extends PacketUdpHandler {
