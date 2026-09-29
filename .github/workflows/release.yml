@@ -1,0 +1,93 @@
+name: Release
+
+# On a version tag: build the plugin component, verify it is a real component,
+# and attach it to a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  component:
+    name: build component
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasip2-release
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-component
+
+      # `pumpkin-plugin-api` is a git-tag dependency, so the Pumpkin API is
+      # fetched by cargo itself. Only the tag itself is asserted here.
+      - name: Check pinned Pumpkin API
+        run: |
+          set -euo pipefail
+          grep -E '^\s*pumpkin-plugin-api\s*=' crates/plasmo-voice-plugin/Cargo.toml
+
+      - name: Build component
+        run: cargo component build --target wasm32-wasip2 -p plasmo-voice-plugin --release
+
+      - name: Verify component shape
+        run: |
+          set -euo pipefail
+          wasm=$(find target/wasm32-wasip2/release -maxdepth 1 -name '*.wasm' -type f | head -n1)
+          if [ -z "$wasm" ]; then
+            echo "::error title=No component produced::cargo-component emitted no .wasm under target/wasm32-wasip2/release"
+            exit 1
+          fi
+          python3 - "$wasm" <<'PY'
+          import sys
+          data = open(sys.argv[1], "rb").read(8)
+          assert data[:4] == b"\x00asm", f"not a wasm binary: {data[:4]!r}"
+          layer = int.from_bytes(data[4:6], "little")
+          assert layer == 0x0d, (
+              f"expected a component (layer 0x0d), got layer 0x{layer:04x}; "
+              "the host rejects core modules"
+          )
+          print(f"verified: component-model layer 0x{layer:04x}")
+          PY
+
+      - name: Stage artefacts
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/wasm32-wasip2/release/plasmo_voice_plugin.wasm dist/plasmo-voice.wasm
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plasmo-voice-component
+          path: dist/plasmo-voice.wasm
+          if-no-files-found: error
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/plasmo-voice.wasm
+          generate_release_notes: true
+          body: |
+            Plasmo Voice–compatible voice server, built as a Pumpkin WASM component.
+
+            **Install:** drop `plasmo-voice.wasm` into the server's `plugins/` directory.
+            The plugin needs `network.udp.bind`, a send permission
+            (`network.udp.connect` / `network.udp` / `network.outbound`), and
+            `fs.read.data` + `fs.write.data`; and the server config must keep
+            `plugins.loopback_only = false`.
+
+            Built against the pinned Pumpkin API `0.2.0+26.3-26.51`.

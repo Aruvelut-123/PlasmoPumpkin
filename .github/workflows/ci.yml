@@ -1,0 +1,202 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Protocol core: format, lint, test on the host target, plus the pinned-API
+  # policy check.
+  # ---------------------------------------------------------------------------
+  core:
+    name: core (fmt / clippy / test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build (release)
+        run: cargo build --workspace --release
+
+  # ---------------------------------------------------------------------------
+  # Pinned-API policy (AGENTS.md rule 3).
+  #
+  # The project uses, and only uses, the latest Pumpkin *stable* API, declared as
+  # a git tag. Guard the two ways that pin can silently rot: a crates.io version
+  # requirement creeping back in, and an older prerelease being pinned.
+  # ---------------------------------------------------------------------------
+  policy:
+    name: policy (pinned Pumpkin API)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Plugin must pin pumpkin-plugin-api as a git tag
+        run: |
+          set -euo pipefail
+          manifest=crates/plasmo-voice-plugin/Cargo.toml
+          line=$(grep -E '^\s*pumpkin-plugin-api\s*=' "$manifest" || true)
+          if [ -z "$line" ]; then
+            echo "::error title=pumpkin-plugin-api not declared::$manifest does not declare pumpkin-plugin-api."
+            exit 1
+          fi
+          echo "declared: $line"
+
+          if ! printf '%s' "$line" | grep -q 'git = "https://github.com/Pumpkin-MC/Pumpkin"'; then
+            echo "::error title=Pumpkin API must be a git tag::pumpkin-plugin-api must be pinned to the \
+          Pumpkin release tag, not a crates.io version. Regional mirrors lag and often only carry the \
+          obsolete 0.1.0-dev prerelease, which breaks resolution. See AGENTS.md rule 3."
+            exit 1
+          fi
+
+          if ! printf '%s' "$line" | grep -qE 'tag = "[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "::error title=Pumpkin API tag missing::expected a stable release tag such as \
+          'tag = \"0.2.0+26.3-26.51\"'."
+            exit 1
+          fi
+
+      - name: Reject the obsolete 0.1.0-dev prerelease
+        run: |
+          set -euo pipefail
+          # Match only real pins: a dependency declaration or a Cargo.lock package
+          # entry. Comments explaining why 0.1.0-dev is rejected are fine.
+          if grep -nE '^\s*pumpkin-plugin-api\s*=.*0\.1\.0-dev' \
+               Cargo.toml crates/*/Cargo.toml 2>/dev/null; then
+            echo "::error title=Obsolete Pumpkin API pinned::0.1.0-dev is no longer supported. \
+          Use the latest stable API. See AGENTS.md rule 3."
+            exit 1
+          fi
+          if grep -nA1 '^name = "pumpkin-plugin-api"' Cargo.lock 2>/dev/null | grep -q '0\.1\.0-dev'; then
+            echo "::error title=Obsolete Pumpkin API in Cargo.lock::Cargo.lock still resolves \
+          0.1.0-dev. Refresh it against the git tag. See AGENTS.md rule 3."
+            exit 1
+          fi
+          echo "no 0.1.0-dev pin found"
+
+      - name: Cargo.lock must be tracked
+        run: |
+          set -euo pipefail
+          if ! git ls-files --error-unmatch Cargo.lock >/dev/null 2>&1; then
+            echo "::error title=Cargo.lock is untracked::The lockfile pins the exact Pumpkin API commit; \
+          without it the build is not reproducible."
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Plugin: build the wasm32-wasip2 component.
+  #
+  # No checkout/vendor step is needed: the plugin's `pumpkin-plugin-api`
+  # dependency is a git tag, so cargo fetches the API (and the exact pinned
+  # commit) by itself.
+  # ---------------------------------------------------------------------------
+  plugin:
+    name: plugin (wasm32-wasip2 component)
+    runs-on: ubuntu-latest
+    needs: core
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasip2
+
+      - name: Install cargo-component
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-component
+
+      - name: Build component
+        run: |
+          cargo component build \
+            --target wasm32-wasip2 \
+            -p plasmo-voice-plugin \
+            --release
+
+      - name: Verify component shape
+        run: |
+          set -euo pipefail
+          wasm=$(find target/wasm32-wasip2/release -maxdepth 1 -name '*.wasm' -type f | head -n1)
+          if [ -z "$wasm" ]; then
+            echo "::error title=No component produced::cargo-component emitted no .wasm under target/wasm32-wasip2/release"
+            exit 1
+          fi
+          echo "component: $wasm ($(stat -c%s "$wasm") bytes)"
+          # A WebAssembly *component* starts with the 0x00 0x61 0x73 0x6d magic
+          # followed by a component-model version, not the core module version.
+          python3 - "$wasm" <<'PY'
+          import sys
+          data = open(sys.argv[1], "rb").read(8)
+          assert data[:4] == b"\x00asm", f"not a wasm binary: {data[:4]!r}"
+          layer = int.from_bytes(data[4:6], "little")
+          assert layer == 0x0d, (
+              f"expected a component (layer 0x0d), got layer 0x{layer:04x}; "
+              "the host rejects core modules"
+          )
+          print(f"verified: component-model layer 0x{layer:04x}")
+          PY
+
+      - name: Upload component
+        uses: actions/upload-artifact@v4
+        with:
+          name: plasmo-voice-plugin-wasm32-wasip2
+          path: target/wasm32-wasip2/release/*.wasm
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Documentation / repo hygiene.
+  # ---------------------------------------------------------------------------
+  hygiene:
+    name: hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Forbid build artefacts from being committed
+        run: |
+          set -euo pipefail
+          bad=$(git ls-files | grep -E '(^|/)(target/|\.recon/.*\.jsonl$)|\.(rlib|rmeta|wasm)$' || true)
+          if [ -n "$bad" ]; then
+            echo "::error title=Build artefacts are tracked::Remove these from git:"
+            echo "$bad"
+            exit 1
+          fi
+
+      - name: Required docs exist
+        run: |
+          set -euo pipefail
+          for f in README.md AGENTS.md LICENSE; do
+            [ -s "$f" ] || { echo "::error title=Missing $f::$f is missing or empty"; exit 1; }
+          done
