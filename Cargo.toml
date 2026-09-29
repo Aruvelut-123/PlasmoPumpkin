@@ -1,4 +1,8 @@
-﻿[workspace]
+[workspace]
+# `.recon/probe` is a throwaway recon crate that captures the plugin ABI shape.
+# It is deliberately NOT a member: it pins an obsolete `pumpkin-plugin-api`
+# (0.1.0-dev) and would otherwise drag that version into Cargo.lock and into
+# `cargo test` runs. `.recon/` is evidence, not a build input (see AGENTS.md §3).
 members = ["crates/*"]
+exclude = [".recon/probe"]
 resolver = "2"
-

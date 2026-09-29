@@ -2,5 +2,27 @@
 name = "plasmo-voice-plugin"
 version = "0.1.0"
 edition = "2024"
+description = "Plasmo Voice-compatible voice server, running as a Pumpkin WASM component."
+license = "MIT"
+
+[lib]
+# The plugin is loaded as a WebAssembly *component*; `cdylib` is what the
+# Pumpkin loader expects (see .recon/PLUGIN-INTEGRATION.md §5).
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+# Protocol core: the single source of truth for everything on the wire.
+plasmo-voice-core = { path = "../plasmo-voice-core" }
+# Pumpkin plugin ABI. `pumpkin-plugin-api` runs `wit_bindgen::generate!` for us —
+# a plugin must never call it itself.
+#
+# Pinned to the latest Pumpkin *stable* API: 0.2.0+26.3-26.51.
+#
+# This is a git dependency on the release tag, not a crates.io version. The git
+# source resolves straight from GitHub, so it is immune to stale crates.io
+# mirrors — a mirror that has not synced the 0.2.0 release is a common failure
+# mode for anyone behind one (the mirror only carries 0.1.0-dev). The tag also
+# names the exact commit the API was verified against.
+pumpkin-plugin-api = { git = "https://github.com/Pumpkin-MC/Pumpkin", tag = "0.2.0+26.3-26.51" }
+uuid = "1"
+tracing = "0.1"

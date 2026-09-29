@@ -1,7 +1,10 @@
 # Rust build artifacts
 /target
 **/target
-Cargo.lock
+
+# Cargo.lock is intentionally TRACKED: this workspace ships a plugin artifact
+# built against a pinned Pumpkin API git tag, and committing the lockfile is what
+# makes that pin reproducible in CI and for downstream builders.
 
 # Editor / OS
 .vscode
