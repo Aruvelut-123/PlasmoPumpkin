@@ -10,8 +10,11 @@ The project is a Cargo workspace with two crates:
 | `crates/plasmo-voice-core` | any (host) | Pure-Rust re-implementation of the Plasmo Voice 2.x wire format: UDP/TCP packet codecs, packet registry, and all serializable data models. Byte-for-byte compatible with the upstream Java `su.plo.voice.proto`. |
 | `crates/plasmo-voice-plugin` | `wasm32-wasip2` | The voice server itself, compiled to a WebAssembly *component* and loaded by Pumpkin as a plugin. Runs the UDP data plane in-guest and persists state to the plugin data folder. |
 
-> `.recon/` holds the reconnaissance that backs the wire format and the Pumpkin
-> plugin ABI. It is **not** part of the build; see [`.recon/PLUGIN-INTEGRATION.md`](.recon/PLUGIN-INTEGRATION.md).
+> `.recon/` holds the reconnaissance that backs both halves of the project: the Java
+> protocol dumps behind the wire codecs, and the snapshots of the pinned
+> `pumpkin-plugin-api` behind the plugin. It is **not** part of the build. A curated
+> subset is committed — e.g. [`.recon/WIRE.txt`](.recon/WIRE.txt) and
+> [`.recon/plugin-api.txt`](.recon/plugin-api.txt) — and the rest is gitignored scratch.
 
 ---
 
@@ -19,11 +22,12 @@ The project is a Cargo workspace with two crates:
 
 | Area | State |
 | --- | --- |
-| `plasmo-voice-core` wire format (UDP + 26 TCP packets + data models) | ✅ implemented, 39 tests passing |
-| `plasmo-voice-plugin` (Pumpkin component) | 🚧 scaffold only — UDP server not implemented yet |
-| Native tests (`cargo test`) | ✅ passing |
-| `wasm32-wasip2` component build | ✅ toolchain verified |
-| README / AGENTS.md / build scripts | ✅ this document |
+| `plasmo-voice-core` wire format (UDP + 26 TCP packets + data models) | ✅ implemented, 39 tests |
+| `plasmo-voice-plugin` (Pumpkin component) | ✅ UDP voice server, `plasmo:voice/v2` IPC handshake, state persistence — 21 tests |
+| Native tests (`cargo test --workspace`) | ✅ 60 tests passing |
+| `wasm32-wasip2` component build | ✅ verified: a component (layer `0x0d`) exporting all six host entry points |
+| Lint & format (`cargo fmt`, `cargo clippy -D warnings`) | ✅ clean on the host **and** on `wasm32-wasip2` |
+| CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) | ✅ four jobs: `core`, `policy`, `plugin`, `hygiene` |
 
 ---
 
@@ -77,12 +81,13 @@ IDs are derived from the packet struct, mirroring `PacketTcpCodec.getType(...)` 
 
 ## Building
 
-Requirements: a stable Rust toolchain with the `wasm32-wasip2` target, plus
-[`cargo-component`](https://github.com/bytecodealliance/cargo-component) for the plugin.
+Requirements: a stable Rust toolchain with the `wasm32-wasip2` target. Nothing else — the
+plugin's only ABI dependency is fetched from GitHub through its git tag, and
+`wasm32-wasip2` already emits a WebAssembly **component**, so no `cargo-component`
+(or any other post-processing tool) is involved.
 
 ```powershell
 rustup target add wasm32-wasip2
-cargo install cargo-component
 ```
 
 ### Native build & tests (protocol core)
@@ -126,21 +131,32 @@ bug to be fixed, not a preference.
 #### Building
 
 ```powershell
-cargo build -p plasmo-voice-plugin --target wasm32-wasip2
+cargo build --target wasm32-wasip2 -p plasmo-voice-plugin --release
 ```
+
+The artifact is `target/wasm32-wasip2/release/plasmo_voice_plugin.wasm`. (`cargo-component`
+is deliberately not used: v0.21.1 cannot decode the component its own `wit-bindgen` 0.62
+emits, and it would be redundant — the target output is already a component.)
 
 Note: the historical `PUMPKIN_DIR` checkout override is no longer required — the
 tag dependency fetches the API from GitHub. (If you deliberately need to build
 against a local, unreleased Pumpkin checkout, add a `[patch]` entry pointing at
 `crates/pumpkin-plugin-api`; do not change the published requirement.)
 
-Scripted shortcuts (see [`scripts/`](scripts)):
+The commands CI runs are the canonical ones; there are no wrapper scripts that could drift
+out of sync with them.
 
-| Script | Purpose |
+| Task | Command |
 | --- | --- |
-| `scripts/build.ps1` | Format check + build + test the workspace, then build the plugin component. |
-| `scripts/test.ps1` | Run the native test suite (optionally one package). |
-| `scripts/build-plugin.ps1` | Build only the `wasm32-wasip2` component and print the `.wasm` path. |
+| Whole workspace tests | `cargo test --workspace` |
+| One crate | `cargo test -p plasmo-voice-core` |
+| Format check | `cargo fmt --all -- --check` |
+| Host lint | `cargo clippy --workspace --all-targets -- -D warnings` |
+| Component lint | `cargo clippy --target wasm32-wasip2 -p plasmo-voice-plugin --all-targets -- -D warnings` |
+| Component build | `cargo build --target wasm32-wasip2 -p plasmo-voice-plugin --release` |
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) is the canonical definition of what
+"passing" means. If it and this table ever disagree, the workflow wins.
 
 ---
 
@@ -179,9 +195,8 @@ Scripted shortcuts (see [`scripts/`](scripts)):
 Cargo.toml                       workspace (members = crates/*)
 README.md                        this file
 AGENTS.md                        contributor / agent working agreement
-scripts/                         build & test entry points
 crates/
-  plasmo-voice-core/
+  plasmo-voice-core/             the protocol (host-buildable, no I/O)
     src/
       lib.rs                     crate docs, re-exports, PROTOCOL_VERSION
       wire.rs                    TCP + UDP codecs, packet registry, 26 TCP + 5 UDP packets
@@ -189,8 +204,15 @@ crates/
       util.rs                    WireReader / WireWriter (big-endian, modified UTF-8, safe reads)
       md5.rs                     MD5 + name-based UUID generation
       error.rs                   VoiceError
-  plasmo-voice-plugin/           Pumpkin WASM component (work in progress)
-.recon/                          reconnaissance: wire dumps, Pumpkin ABI notes (not built)
+  plasmo-voice-plugin/           the server (wasm32-wasip2 component)
+    src/
+      lib.rs                     crate docs, IPC parser, the WASI-gated `glue` module
+      server.rs                  UDP voice server: pings, connections, audio fan-out
+      runtime.rs                 process-global socket + protocol state, pumped once per tick
+      state.rs                   secret UUID and persisted state in the plugin data folder
+      tick.rs                    `ServerTickStartEvent` bridge (WASI only)
+.github/workflows/ci.yml         the canonical build/lint/test definition
+.recon/                          reconnaissance: wire dumps, pinned-API snapshots (not built)
 ```
 
 ---

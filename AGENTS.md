@@ -15,12 +15,26 @@ Two crates, one workspace:
 * `crates/plasmo-voice-plugin` — the server. Compiles to `wasm32-wasip2`, implements the
   `pumpkin-plugin-api::Plugin` trait, runs the UDP data plane in-guest.
 
+  Inside that crate, everything that is *not* Pumpkin-specific — the protocol server, the
+  state file, the socket pump, the IPC parser — is ordinary Rust and is covered by
+  `cargo test` on the host. Only the ABI glue (`tick.rs` and the `glue` module) names
+  `pumpkin-plugin-api`, and that dependency is declared for `target_os = "wasi"` only.
+  See rule 6 for why that is load-bearing.
+
 ## 2. Non-negotiable rules
 
 1. **Never break `cargo test`.** The workspace must build and test cleanly on the host
    before you consider any change done.
 2. **Never break the `wasm32-wasip2` build.** The plugin is only useful as a component.
-   Verify with `scripts/build-plugin.ps1` after touching plugin code.
+   Verify both halves after touching plugin code:
+
+   ```powershell
+   cargo build  --target wasm32-wasip2 -p plasmo-voice-plugin --release
+   cargo clippy --target wasm32-wasip2 -p plasmo-voice-plugin --all-targets -- -D warnings
+   ```
+
+   The clippy run matters as much as the build: the ABI glue is invisible to the host
+   lint, so this is the only place it gets checked (see rule 6).
 3. **Use, and only use, the latest Pumpkin *stable* API — currently `0.2.0`
    (`0.2.0+26.3-26.51`).** This is pinned in
    `crates/plasmo-voice-plugin/Cargo.toml` as a **git tag**, not a crates.io version:
@@ -47,20 +61,38 @@ Two crates, one workspace:
    justification** in the commit message. The crate currently depends only on `uuid`.
 6. **The plugin crate must not be a workspace member dependency of the host build.**
    `wasm32-wasip2` code does not link in native tests; keep the component build isolated.
+   Concretely: `pumpkin-plugin-api` is declared under
+   `[target.'cfg(target_os = "wasi")'.dependencies]`, and every line that names it lives in
+   `tick.rs` or the `glue` module of `lib.rs`.
+
+   This is not a preference. The API generates the component's guest exports, whose symbol
+   names are WIT-mangled (`pumpkin:plugin/metadata@0.1.0#get-metadata`). rustc lists the
+   exported symbols in the ELF *version script* it hands the linker for a `cdylib`, and a
+   version script cannot contain `:`, `@` or `#`, so linking this crate for a native target
+   fails outright:
+
+   ```
+   rust-lld: error: list:10: ; expected, but got :
+       cabi_post_pumpkin:plugin/metadata@0.1.0#get-metadata;
+   ```
+
+   Do not "fix" that by excluding the crate from `cargo test`; fix the dependency scope.
 
 ## 3. Source-of-truth hierarchy
 
 When documents disagree, the order is:
 
 1. the upstream Java source of `su.plo.voice.proto` (local checkout used during recon);
-2. `.recon/PLUGIN-INTEGRATION.md` for the Pumpkin plugin ABI (verified against a real
-   Pumpkin checkout and a real wasm build);
+2. the pinned `pumpkin-plugin-api` source for the Pumpkin plugin ABI — the exact commit the
+   git tag resolves to (`.recon/plugin-api.txt` and `.recon/plugin-trait.txt` are tracked
+   snapshots of it);
 3. the recon dumps under `.recon/` (`WIRE.txt`, `udp-packets.txt`, `proto-*/`, …);
 4. code comments in `crates/*/src`.
 
 `.recon/` is **evidence, not code**. Never let it become a build input, never add it to
 `workspace.members`, and never "fix" code to match a stale dump without re-checking the
-upstream source.
+upstream source. Note that a curated subset of `.recon/` is tracked in git while the rest
+is gitignored scratch; `git ls-files .recon` is the authoritative list.
 
 ## 4. Wire-format invariants
 
@@ -82,12 +114,15 @@ byte sequence, not just `encode → decode == original`.
 
 ## 5. Pumpkin plugin ABI invariants
 
-Derived from `.recon/PLUGIN-INTEGRATION.md`; re-read it before changing plugin structure.
+Derived from the pinned API source and verified against a real wasm build; re-read the
+pinned API before changing plugin structure.
 
 * Target is `wasm32-wasip2` (a **component**). `wasm32-wasip1` modules will not load.
 * `[lib] crate-type = ["cdylib"]`.
 * A plugin **never calls `wit_bindgen::generate!` itself** — `pumpkin-plugin-api` does it.
-* Registration is exactly one crate-level `register_plugin!(MyPlugin);`.
+* Registration is exactly one `register_plugin!(MyPlugin);`, and it lives inside the
+  WASI-only `glue` module (rule 6) rather than at the crate root, so the host build never
+  sees the ABI.
 * Only `Plugin::new` and `Plugin::metadata` are required; the rest are defaulted.
 * **IPC (`send-ipc-message`) is a control plane, not a data plane.** It is synchronous and
   carries `Vec<u8>`; never push audio frames through it. Audio goes over the UDP socket.
@@ -112,9 +147,15 @@ Derived from `.recon/PLUGIN-INTEGRATION.md`; re-read it before changing plugin s
 ## 7. Testing
 
 ```powershell
-scripts\test.ps1                 # whole workspace
-scripts\test.ps1 plasmo-voice-core
+cargo test --workspace                   # whole workspace
+cargo test -p plasmo-voice-core          # one crate
+cargo fmt --all -- --check               # formatting
+cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) is the canonical definition of what
+"passing" means. If a command here and the workflow ever disagree, the workflow wins — and
+fixing the disagreement is part of your change.
 
 * Add tests beside the implementation (`#[cfg(test)] mod tests`) for unit round-trips, and
   use the recon dumps as expected byte fixtures where available.
@@ -129,8 +170,9 @@ scripts\test.ps1 plasmo-voice-core
   ≤ 72 chars.
 * Group reconnaissance artefacts and code separately — a commit that changes the wire
   format must not also shuffle `.recon/` files.
-* Never commit `target/`, `Cargo.lock` (currently ignored for this library-style repo), or
-  editor/OS files.
+* Never commit `target/` or editor/OS files. **`Cargo.lock` stays tracked**: it pins the
+  exact Pumpkin API commit the git tag resolves to, and CI fails if it goes missing.
+  Reconnaissance scratch is gitignored under `.recon/`.
 
 ## 9. Known traps
 
@@ -141,13 +183,24 @@ scripts\test.ps1 plasmo-voice-core
   `println!`, and avoid `unwrap()`/`expect()` outside tests.
 * `std::net` UDP on wasip2 is real but young: only bind/send/receive are permitted by host
   policy; anything else traps.
+* Do **not** reintroduce `cargo-component`. Version 0.21.1 (current) cannot decode the
+  component its own `wit-bindgen` 0.62 emits — it fails with `enum tag name 'generic-9x1'
+  is not in kebab case` *after* writing a valid component. `wasm32-wasip2` already produces
+  a component, so plain `cargo build --target wasm32-wasip2` is both sufficient and
+  correct.
 * Editing `.recon/*.jsonl` session logs is never useful — they are raw captured history.
 
 ## 10. Current work queue
 
-1. Implement `plasmo-voice-plugin` fully: `Plugin` impl, `plasmo:voice/v2` IPC handshake
-   handler, in-guest UDP voice server (`network.udp.bind`), persistence of the secret UUID
-   and state into `context.get_data_folder()`.
-2. Add integration tests that drive `UdpCodec`/`TcpCodec` across the full client lifecycle.
-3. Keep this file and `README.md` in sync with reality — if the status table in `README.md`
+1. ~~Implement `plasmo-voice-plugin` fully.~~ **Done.** The `Plugin` impl, the
+   `plasmo:voice/v2` `handshake`/`status` IPC handler, the in-guest UDP server
+   (`network.udp.bind`) and persistence into `context.get_data_folder()` are all in place.
+   What `server.rs` does today, as pinned by its tests: answers pings, tracks connections by
+   secret **and** address, and fans `PlayerAudio` out to every other client. `SourceAudio`
+   and `SelfAudioInfo` are client-direction ids and are dropped inbound.
+2. Add integration tests that drive `UdpCodec`/`TcpCodec` across the full client lifecycle
+   (connect over TCP → ping/bind over UDP → audio fan-out → disconnect). Today the codecs
+   are covered by per-packet round-trips and the server logic by `server.rs` unit tests;
+   nothing yet exercises a whole session end to end.
+3. **Keep this file and `README.md` in sync with reality.** If a claim in either document
    is wrong, fixing it is part of your change.

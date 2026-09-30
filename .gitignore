@@ -13,6 +13,8 @@
 .DS_Store
 Thumbs.db
 
-# Protocol-recon scratch: captured dumps, probe logs and decompiled upstream
-# sources used while porting the UDP protocol. Local-only working material.
+# Protocol-recon scratch: probe logs, generated WAT dumps and scratch crates.
+# NOTE: this does NOT untrack the curated evidence that was committed earlier
+# (protocol dumps, pinned-API snapshots, extract scripts); `git ls-files .recon`
+# is the authoritative list of those. Only new scratch material lands here.
 .recon/
