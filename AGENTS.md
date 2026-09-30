@@ -192,12 +192,21 @@ fixing the disagreement is part of your change.
 
 ## 10. Current work queue
 
-1. ~~Implement `plasmo-voice-plugin` fully.~~ **Done.** The `Plugin` impl, the
-   `plasmo:voice/v2` `handshake`/`status` IPC handler, the in-guest UDP server
-   (`network.udp.bind`) and persistence into `context.get_data_folder()` are all in place.
-   What `server.rs` does today, as pinned by its tests: answers pings, tracks connections by
-   secret **and** address, and fans `PlayerAudio` out to every other client. `SourceAudio`
-   and `SelfAudioInfo` are client-direction ids and are dropped inbound.
+1. **`plasmo-voice-plugin` is implemented, but not yet functional end to end.** The
+   `Plugin` impl, the `plasmo:voice/v2` `handshake`/`status` IPC handler, the in-guest UDP
+   server (`network.udp.bind`) and persistence into `context.get_data_folder()` are all in
+   place, and `server.rs` answers pings, tracks connections by secret **and** address, and
+   fans `PlayerAudio` out to every other connection. `SourceAudio`/`SelfAudioInfo` are
+   client-direction ids and are dropped inbound. All of that is pinned by tests.
+
+   **The gap:** only tests call `add_connection`, so a running server's connection table
+   stays empty — `connections=0`, and `PlayerAudio` is never relayed to anyone. Upstream
+   fills that table from the MC-side control plane
+   (`VoiceUdpServerConnectionManager.getSecretByPlayerId` creates a player's secret, and the
+   UDP connection is added once a datagram arrives for a known secret); this plugin has no
+   equivalent source of "which secrets are real players" yet. Closing the gap means either
+   extending the `plasmo:voice/v2` IPC with connect/disconnect messages, or serving the TCP
+   control plane in-guest.
 2. Add integration tests that drive `UdpCodec`/`TcpCodec` across the full client lifecycle
    (connect over TCP → ping/bind over UDP → audio fan-out → disconnect). Today the codecs
    are covered by per-packet round-trips and the server logic by `server.rs` unit tests;

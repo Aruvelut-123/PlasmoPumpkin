@@ -23,11 +23,28 @@ The project is a Cargo workspace with two crates:
 | Area | State |
 | --- | --- |
 | `plasmo-voice-core` wire format (UDP + 26 TCP packets + data models) | ✅ implemented, 39 tests |
-| `plasmo-voice-plugin` (Pumpkin component) | ✅ UDP voice server, `plasmo:voice/v2` IPC handshake, state persistence — 21 tests |
+| `plasmo-voice-plugin` (Pumpkin component) | 🚧 UDP voice server, `plasmo:voice/v2` IPC handshake, state persistence — 21 tests, but not yet functional end to end (see below) |
 | Native tests (`cargo test --workspace`) | ✅ 60 tests passing |
 | `wasm32-wasip2` component build | ✅ verified: a component (layer `0x0d`) exporting all six host entry points |
 | Lint & format (`cargo fmt`, `cargo clippy -D warnings`) | ✅ clean on the host **and** on `wasm32-wasip2` |
 | CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) | ✅ four jobs: `core`, `policy`, `plugin`, `hygiene` |
+
+### Known gap: nothing registers a connection yet
+
+`VoiceServer` answers pings, tracks connections by secret **and** address, and fans
+`PlayerAudio` out to every other connection — all covered by tests. But in a running server
+the connection table stays empty, because **`add_connection` is only ever called from
+tests**. The consequences are concrete: the `status` IPC reply always reports
+`connections=0`, and `relay()` iterates an empty map, so no audio is ever forwarded. The
+component is currently a reachability (ping) endpoint, not a working voice relay.
+
+Upstream fills that table from the Minecraft-side control plane: the voice server mints a
+per-player secret (`VoiceUdpServerConnectionManager.getSecretByPlayerId`), ships it to the
+client in the clientbound `ConnectionPacket` over TCP, and `addConnection` runs when a
+datagram arrives bearing a secret it already knows. This plugin has no equivalent source of
+"which secrets belong to real players" yet, so closing the gap is a design decision:
+extend the `plasmo:voice/v2` IPC with connect/disconnect messages, or serve the TCP control
+plane in-guest.
 
 ---
 
