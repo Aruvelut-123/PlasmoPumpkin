@@ -132,14 +132,9 @@ jobs:
         with:
           key: wasip2
 
-      - name: Install cargo-component
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-component
-
       - name: Build component
         run: |
-          cargo component build \
+          cargo build \
             --target wasm32-wasip2 \
             -p plasmo-voice-plugin \
             --release
@@ -147,9 +142,9 @@ jobs:
       - name: Verify component shape
         run: |
           set -euo pipefail
-          wasm=$(find target/wasm32-wasip2/release -maxdepth 1 -name '*.wasm' -type f | head -n1)
+          wasm=$(find target/wasm32-wasip2/release -maxdepth 1 -name 'plasmo_voice_plugin.wasm' -type f | head -n1)
           if [ -z "$wasm" ]; then
-            echo "::error title=No component produced::cargo-component emitted no .wasm under target/wasm32-wasip2/release"
+            echo "::error title=No component produced::the build emitted no plasmo_voice_plugin.wasm under target/wasm32-wasip2/release"
             exit 1
           fi
           echo "component: $wasm ($(stat -c%s "$wasm") bytes)"
@@ -166,6 +161,22 @@ jobs:
           )
           print(f"verified: component-model layer 0x{layer:04x}")
           PY
+
+      - name: Verify the plugin exports the host entry points
+        run: |
+          set -euo pipefail
+          wasm=target/wasm32-wasip2/release/plasmo_voice_plugin.wasm
+          # `wasm-tools print` decodes the component and prints its WAT. Grepping
+          # the decoded text proves the guest really does export the functions the
+          # Pumpkin host looks up, rather than merely being a well-formed blob.
+          wasm-tools print "$wasm" > component.wat
+          for entry in init-plugin get-metadata on-load on-unload handle-event handle-ipc-message; do
+            if ! grep -q "\"$entry\"" component.wat; then
+              echo "::error title=Missing entry point::$entry is not exported by the component"
+              exit 1
+            fi
+            echo "ok: $entry"
+          done
 
       - name: Upload component
         uses: actions/upload-artifact@v4

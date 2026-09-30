@@ -30,10 +30,8 @@
 //! state sits behind one [`Mutex`], so the two can never alias the socket;
 //! whoever loses the race simply observes the post-unload state and does nothing.
 
-use pumpkin_plugin_api::events::{
-    EventData, EventHandler, EventPriority, ServerTickStartEvent,
-};
 use pumpkin_plugin_api::Server;
+use pumpkin_plugin_api::events::{EventData, EventHandler, EventPriority, ServerTickStartEvent};
 
 use crate::runtime::with_runtime;
 

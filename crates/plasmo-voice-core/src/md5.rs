@@ -35,7 +35,11 @@ pub fn md5(data: &[u8]) -> [u8; 16] {
     }
     msg.extend_from_slice(&bit_len.to_le_bytes());
 
-    for chunk in msg.chunks_exact(64) {
+    // `msg` was padded above to an exact multiple of 64 bytes, so `chunks` yields
+    // only whole blocks; the debug assertion pins that invariant rather than
+    // leaving a short trailing block to be silently processed as a block.
+    debug_assert_eq!(msg.len() % 64, 0, "MD5 message must be block-aligned");
+    for chunk in msg.chunks(64) {
         let mut m = [0u32; 16];
         for (i, word) in m.iter_mut().enumerate() {
             *word = u32::from_le_bytes([
@@ -134,9 +138,6 @@ mod tests {
         assert_eq!(a.get_variant(), uuid::Variant::RFC4122);
         // Independently checked against the JVM:
         // nameUUIDFromBytes("proximity_activation") == 4aec07ba-d109-3345-9a0a-92022a116cd0
-        assert_eq!(
-            a.to_string(),
-            "4aec07ba-d109-3345-9a0a-92022a116cd0"
-        );
+        assert_eq!(a.to_string(), "4aec07ba-d109-3345-9a0a-92022a116cd0");
     }
 }

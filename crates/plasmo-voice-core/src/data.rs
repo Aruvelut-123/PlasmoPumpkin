@@ -390,6 +390,16 @@ impl VoiceActivation {
         }
     }
 
+    /// Builds an activation, deriving `id` and validating `default_distance`.
+    ///
+    /// The argument list is long because it mirrors the wire fields 1:1 — upstream
+    /// `VoiceActivation` carries the same ten values in its constructor, and a
+    /// builder would only spread one flat, fully-known struct over two types.
+    /// Grouping them would invent a grouping the protocol does not have.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "mirrors the ten flat fields of the upstream VoiceActivation constructor"
+    )]
     pub fn new(
         name: String,
         translation: String,
@@ -935,12 +945,24 @@ mod tests {
         // [-1, max] clamps into [1, max], else max / 2
         assert_eq!(VoiceActivation::validate_default_distance(&[-1, 32], 8), 8);
         assert_eq!(VoiceActivation::validate_default_distance(&[-1, 32], 0), 16);
-        assert_eq!(VoiceActivation::validate_default_distance(&[-1, 32], 99), 16);
+        assert_eq!(
+            VoiceActivation::validate_default_distance(&[-1, 32], 99),
+            16
+        );
         // member -> itself
-        assert_eq!(VoiceActivation::validate_default_distance(&[8, 16, 32], 16), 16);
+        assert_eq!(
+            VoiceActivation::validate_default_distance(&[8, 16, 32], 16),
+            16
+        );
         // non-member -> middle element (`distances.get(size / 2)`)
-        assert_eq!(VoiceActivation::validate_default_distance(&[8, 16, 32], 24), 16);
-        assert_eq!(VoiceActivation::validate_default_distance(&[8, 16, 32, 64], 24), 32);
+        assert_eq!(
+            VoiceActivation::validate_default_distance(&[8, 16, 32], 24),
+            16
+        );
+        assert_eq!(
+            VoiceActivation::validate_default_distance(&[8, 16, 32, 64], 24),
+            32
+        );
     }
 
     #[test]

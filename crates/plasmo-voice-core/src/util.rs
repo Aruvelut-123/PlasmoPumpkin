@@ -419,9 +419,7 @@ fn decode_modified_utf8(bytes: &[u8]) -> Result<String> {
                                     | (((n1 & 0x3F) as u32) << 6)
                                     | ((n2 & 0x3F) as u32);
                                 if (0xDC00..=0xDFFF).contains(&low) {
-                                    let cp = 0x10000
-                                        + (((c - 0xD800) as u32) << 10)
-                                        + (low - 0xDC00);
+                                    let cp = 0x10000 + ((c - 0xD800) << 10) + (low - 0xDC00);
                                     if let Some(ch) = char::from_u32(cp) {
                                         out.push(ch);
                                         i += 6;
@@ -477,7 +475,7 @@ mod tests {
         let s = "héllo wörld 中文 🎃👻";
         let mut w = WireWriter::new();
         w.write_utf(s).unwrap();
-        let mut r = WireReader::new(&w.as_slice());
+        let mut r = WireReader::new(w.as_slice());
         assert_eq!(r.read_utf().unwrap(), s);
     }
 
@@ -548,7 +546,7 @@ mod tests {
         let mut w = WireWriter::new();
         w.write_optional_string(Some("abc")).unwrap();
         w.write_optional_string(None).unwrap();
-        let mut r = WireReader::new(&w.as_slice());
+        let mut r = WireReader::new(w.as_slice());
         assert_eq!(r.read_optional_string().unwrap(), Some("abc".to_string()));
         assert_eq!(r.read_optional_string().unwrap(), None);
     }

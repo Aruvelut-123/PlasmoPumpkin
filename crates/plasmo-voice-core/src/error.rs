@@ -62,7 +62,10 @@ impl fmt::Display for VoiceError {
                 write!(f, "int value {value} out of range [{min}, {max}]")
             }
             VoiceError::UnexpectedEof { needed, remaining } => {
-                write!(f, "unexpected end of data (needed {needed}, had {remaining})")
+                write!(
+                    f,
+                    "unexpected end of data (needed {needed}, had {remaining})"
+                )
             }
             VoiceError::TrailingBytes(n) => write!(f, "trailing {n} bytes after packet body"),
             VoiceError::NullValue => write!(f, "unexpected null value on the wire"),

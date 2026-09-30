@@ -39,9 +39,7 @@ pub enum PacketDirection {
 impl PacketDirection {
     /// `PacketDirection.accepts`: matches if either side is `Any`.
     pub fn accepts(self, direction: PacketDirection) -> bool {
-        self == PacketDirection::Any
-            || direction == PacketDirection::Any
-            || self == direction
+        self == PacketDirection::Any || direction == PacketDirection::Any || self == direction
     }
 }
 
@@ -123,12 +121,18 @@ impl PacketRegistry {
 
     /// Registered direction of a TCP id, if any.
     pub fn tcp_direction(&self, id: u32) -> Option<PacketDirection> {
-        self.tcp.iter().find(|(i, _, _)| *i == id).map(|(_, d, _)| *d)
+        self.tcp
+            .iter()
+            .find(|(i, _, _)| *i == id)
+            .map(|(_, d, _)| *d)
     }
 
     /// Registered direction of a UDP id, if any.
     pub fn udp_direction(&self, id: u32) -> Option<PacketDirection> {
-        self.udp.iter().find(|(i, _, _)| *i == id).map(|(_, d, _)| *d)
+        self.udp
+            .iter()
+            .find(|(i, _, _)| *i == id)
+            .map(|(_, d, _)| *d)
     }
 }
 
@@ -390,8 +394,11 @@ impl TcpPacket {
     /// The direction this packet id is registered for.
     pub fn direction(&self) -> PacketDirection {
         match self {
-            TcpPacket::LanguageRequest(_) | TcpPacket::PlayerInfo(_) | TcpPacket::PlayerState(_)
-            | TcpPacket::PlayerAudioEnd(_) | TcpPacket::PlayerActivationDistances(_)
+            TcpPacket::LanguageRequest(_)
+            | TcpPacket::PlayerInfo(_)
+            | TcpPacket::PlayerState(_)
+            | TcpPacket::PlayerAudioEnd(_)
+            | TcpPacket::PlayerActivationDistances(_)
             | TcpPacket::SourceInfoRequest(_) => PacketDirection::Server,
             _ => PacketDirection::Client,
         }
@@ -575,46 +582,92 @@ impl TcpPacket {
 fn tcp_entries() -> Vec<(u32, PacketDirection, TcpFactory)> {
     use PacketDirection::*;
     vec![
-        (0x01, Client, |r| Ok(TcpPacket::Connection(read_connection(r)?))),
-        (0x02, Client, |r| Ok(TcpPacket::PlayerInfoRequest(read_player_info_request(r)?))),
+        (0x01, Client, |r| {
+            Ok(TcpPacket::Connection(read_connection(r)?))
+        }),
+        (0x02, Client, |r| {
+            Ok(TcpPacket::PlayerInfoRequest(read_player_info_request(r)?))
+        }),
         (0x03, Client, |r| Ok(TcpPacket::Config(read_config(r)?))),
-        (0x04, Client, |r| Ok(TcpPacket::ConfigPlayerInfo(read_config_player_info(r)?))),
-        (0x05, Server, |r| Ok(TcpPacket::LanguageRequest(read_language_request(r)?))),
+        (0x04, Client, |r| {
+            Ok(TcpPacket::ConfigPlayerInfo(read_config_player_info(r)?))
+        }),
+        (0x05, Server, |r| {
+            Ok(TcpPacket::LanguageRequest(read_language_request(r)?))
+        }),
         (0x06, Client, |r| Ok(TcpPacket::Language(read_language(r)?))),
-        (0x07, Client, |r| Ok(TcpPacket::PlayerList(read_player_list(r)?))),
-        (0x08, Client, |r| Ok(TcpPacket::PlayerInfoUpdate(read_player_info_update(r)?))),
-        (0x09, Client, |r| Ok(TcpPacket::PlayerDisconnect(read_player_disconnect(r)?))),
-        (0x0A, Server, |r| Ok(TcpPacket::PlayerInfo(read_player_info(r)?))),
-        (0x0B, Server, |r| Ok(TcpPacket::PlayerState(read_player_state(r)?))),
-        (0x0C, Server, |r| Ok(TcpPacket::PlayerAudioEnd(read_player_audio_end(r)?))),
-        (0x0D, Server, |r| Ok(TcpPacket::PlayerActivationDistances(
-            read_player_activation_distances(r)?,
-        ))),
-        (0x0E, Client, |r| Ok(TcpPacket::DistanceVisualize(read_distance_visualize(r)?))),
-        (0x0F, Server, |r| Ok(TcpPacket::SourceInfoRequest(read_source_info_request(r)?))),
-        (0x10, Client, |r| Ok(TcpPacket::SourceInfo(read_source_info(r)?))),
-        (0x11, Client, |r| Ok(TcpPacket::SelfSourceInfo(read_self_source_info(r)?))),
-        (0x12, Client, |r| Ok(TcpPacket::SourceAudioEnd(read_source_audio_end(r)?))),
-        (0x13, Client, |r| Ok(TcpPacket::ActivationRegister(read_activation_register(r)?))),
-        (0x14, Client, |r| Ok(TcpPacket::ActivationUnregister(
-            read_activation_unregister(r)?,
-        ))),
-        (0x15, Client, |r| Ok(TcpPacket::SourceLineRegister(read_source_line_register(r)?))),
-        (0x16, Client, |r| Ok(TcpPacket::SourceLineUnregister(
-            read_source_line_unregister(r)?,
-        ))),
-        (0x17, Client, |r| Ok(TcpPacket::SourceLinePlayerAdd(
-            read_source_line_player_add(r)?,
-        ))),
-        (0x18, Client, |r| Ok(TcpPacket::SourceLinePlayerRemove(
-            read_source_line_player_remove(r)?,
-        ))),
-        (0x19, Client, |r| Ok(TcpPacket::SourceLinePlayersList(
-            read_source_line_players_list(r)?,
-        ))),
-        (0x1A, Client, |r| Ok(TcpPacket::AnimatedActionBar(
-            read_animated_action_bar(r)?,
-        ))),
+        (0x07, Client, |r| {
+            Ok(TcpPacket::PlayerList(read_player_list(r)?))
+        }),
+        (0x08, Client, |r| {
+            Ok(TcpPacket::PlayerInfoUpdate(read_player_info_update(r)?))
+        }),
+        (0x09, Client, |r| {
+            Ok(TcpPacket::PlayerDisconnect(read_player_disconnect(r)?))
+        }),
+        (0x0A, Server, |r| {
+            Ok(TcpPacket::PlayerInfo(read_player_info(r)?))
+        }),
+        (0x0B, Server, |r| {
+            Ok(TcpPacket::PlayerState(read_player_state(r)?))
+        }),
+        (0x0C, Server, |r| {
+            Ok(TcpPacket::PlayerAudioEnd(read_player_audio_end(r)?))
+        }),
+        (0x0D, Server, |r| {
+            Ok(TcpPacket::PlayerActivationDistances(
+                read_player_activation_distances(r)?,
+            ))
+        }),
+        (0x0E, Client, |r| {
+            Ok(TcpPacket::DistanceVisualize(read_distance_visualize(r)?))
+        }),
+        (0x0F, Server, |r| {
+            Ok(TcpPacket::SourceInfoRequest(read_source_info_request(r)?))
+        }),
+        (0x10, Client, |r| {
+            Ok(TcpPacket::SourceInfo(read_source_info(r)?))
+        }),
+        (0x11, Client, |r| {
+            Ok(TcpPacket::SelfSourceInfo(read_self_source_info(r)?))
+        }),
+        (0x12, Client, |r| {
+            Ok(TcpPacket::SourceAudioEnd(read_source_audio_end(r)?))
+        }),
+        (0x13, Client, |r| {
+            Ok(TcpPacket::ActivationRegister(read_activation_register(r)?))
+        }),
+        (0x14, Client, |r| {
+            Ok(TcpPacket::ActivationUnregister(read_activation_unregister(
+                r,
+            )?))
+        }),
+        (0x15, Client, |r| {
+            Ok(TcpPacket::SourceLineRegister(read_source_line_register(r)?))
+        }),
+        (0x16, Client, |r| {
+            Ok(TcpPacket::SourceLineUnregister(
+                read_source_line_unregister(r)?,
+            ))
+        }),
+        (0x17, Client, |r| {
+            Ok(TcpPacket::SourceLinePlayerAdd(read_source_line_player_add(
+                r,
+            )?))
+        }),
+        (0x18, Client, |r| {
+            Ok(TcpPacket::SourceLinePlayerRemove(
+                read_source_line_player_remove(r)?,
+            ))
+        }),
+        (0x19, Client, |r| {
+            Ok(TcpPacket::SourceLinePlayersList(
+                read_source_line_players_list(r)?,
+            ))
+        }),
+        (0x1A, Client, |r| {
+            Ok(TcpPacket::AnimatedActionBar(read_animated_action_bar(r)?))
+        }),
     ]
 }
 
@@ -1082,9 +1135,15 @@ fn udp_entries() -> Vec<(u32, PacketDirection, UdpFactory)> {
     use PacketDirection::*;
     vec![
         (0x01, Any, |r| Ok(UdpPacket::Ping(read_ping(r)?))),
-        (0x02, Server, |r| Ok(UdpPacket::PlayerAudio(read_player_audio(r)?))),
-        (0x03, Client, |r| Ok(UdpPacket::SourceAudio(read_source_audio(r)?))),
-        (0x04, Client, |r| Ok(UdpPacket::SelfAudioInfo(read_self_audio_info(r)?))),
+        (0x02, Server, |r| {
+            Ok(UdpPacket::PlayerAudio(read_player_audio(r)?))
+        }),
+        (0x03, Client, |r| {
+            Ok(UdpPacket::SourceAudio(read_source_audio(r)?))
+        }),
+        (0x04, Client, |r| {
+            Ok(UdpPacket::SelfAudioInfo(read_self_audio_info(r)?))
+        }),
         (0x100, Any, |r| Ok(UdpPacket::Custom(read_custom(r)?))),
     ]
 }
@@ -1496,7 +1555,10 @@ mod tests {
 
         for packet in &packets {
             let encoded = codec().encode(packet).unwrap();
-            let decoded = codec().decode(&encoded, packet.direction()).unwrap().unwrap();
+            let decoded = codec()
+                .decode(&encoded, packet.direction())
+                .unwrap()
+                .unwrap();
             assert_eq!(&decoded, packet, "packet id {:#04x}", packet.id());
         }
     }
@@ -1504,7 +1566,10 @@ mod tests {
     #[test]
     fn tcp_unknown_id_is_none() {
         let data = [0x7F];
-        assert!(codec().decode(&data, PacketDirection::Client).unwrap().is_none());
+        assert!(codec()
+            .decode(&data, PacketDirection::Client)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1563,7 +1628,10 @@ mod tests {
         assert_eq!(&encoded[21..29], &999i64.to_be_bytes());
         assert_eq!(&encoded[29..37], &1234i64.to_be_bytes());
 
-        let decoded = codec.decode(&encoded, PacketDirection::Any).unwrap().unwrap();
+        let decoded = codec
+            .decode(&encoded, PacketDirection::Any)
+            .unwrap()
+            .unwrap();
         assert_eq!(decoded, packet);
     }
 
@@ -1630,7 +1698,10 @@ mod tests {
         assert_eq!(envelope.id, 0x03);
         assert_eq!(envelope.secret, Uuid::from_u128(3));
         assert_eq!(envelope.timestamp, 4);
-        let decoded = envelope.decode_packet(PacketDirection::Client).unwrap().unwrap();
+        let decoded = envelope
+            .decode_packet(PacketDirection::Client)
+            .unwrap()
+            .unwrap();
         assert_eq!(decoded, packet);
     }
 
@@ -1643,7 +1714,10 @@ mod tests {
         });
         let codec = UdpCodec::new();
         let encoded = codec.encode(&packet, Uuid::from_u128(1), 0).unwrap();
-        let decoded = codec.decode(&encoded, PacketDirection::Any).unwrap().unwrap();
+        let decoded = codec
+            .decode(&encoded, PacketDirection::Any)
+            .unwrap()
+            .unwrap();
         assert_eq!(decoded, packet);
 
         // short body without the tail still decodes

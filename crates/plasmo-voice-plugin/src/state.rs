@@ -268,7 +268,8 @@ mod tests {
 
     #[test]
     fn ignores_unknown_keys_and_whitespace() {
-        let json = "{\n  \"port\" : 12345 ,\n  \"future_key\": \"ignored\",\n  \"enabled\": true\n}";
+        let json =
+            "{\n  \"port\" : 12345 ,\n  \"future_key\": \"ignored\",\n  \"enabled\": true\n}";
         let state = VoiceServerState::from_json(json).expect("parse");
         assert_eq!(state.port, 12345);
     }

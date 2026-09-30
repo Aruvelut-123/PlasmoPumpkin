@@ -292,7 +292,9 @@ impl Plugin for PlasmoVoicePlugin {
                 // A handshake is answered even when the socket is down: the caller
                 // learns the configured endpoint and can decide to retry later.
                 VoiceIpc::Handshake => {
-                    let port = runtime.port().map_or_else(String::new, |port| port.to_string());
+                    let port = runtime
+                        .port()
+                        .map_or_else(String::new, |port| port.to_string());
                     let secret = runtime
                         .server_secret()
                         .map_or_else(String::new, |secret| secret.to_string());
@@ -312,9 +314,9 @@ impl Plugin for PlasmoVoicePlugin {
                         dropped
                     ))
                 }
-                VoiceIpc::Unknown(command) => {
-                    Err(format!("unsupported {VOICE_IPC_NAMESPACE} command {command:?}"))
-                }
+                VoiceIpc::Unknown(command) => Err(format!(
+                    "unsupported {VOICE_IPC_NAMESPACE} command {command:?}"
+                )),
             }
         })?;
         Ok(reply.into_bytes())

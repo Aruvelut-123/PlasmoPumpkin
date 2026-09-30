@@ -186,10 +186,7 @@ impl VoiceServer {
                 // Putting the whole `ip:port` string in `server_ip` would either
                 // duplicate the port or drop the endpoint entirely.
                 let (server_ip, server_port) = match from.parse::<SocketAddr>() {
-                    Ok(address) => (
-                        Some(address.ip().to_string()),
-                        Some(address.port()),
-                    ),
+                    Ok(address) => (Some(address.ip().to_string()), Some(address.port())),
                     // A hostname (not an IP:port) still round-trips as the address
                     // half, with no port: the codec writes nothing, and the client
                     // learns the reply came from a plain host.
@@ -219,11 +216,7 @@ impl VoiceServer {
             UdpPacket::PlayerAudio(audio) => Handled {
                 outgoing: self.relay(from, |client| {
                     self.codec
-                        .encode(
-                            &UdpPacket::PlayerAudio(audio.clone()),
-                            client.secret,
-                            0,
-                        )
+                        .encode(&UdpPacket::PlayerAudio(audio.clone()), client.secret, 0)
                         .unwrap_or_default()
                 }),
                 was_ping: false,
@@ -334,15 +327,25 @@ mod tests {
     #[test]
     fn connections_are_unique_per_secret_and_address() {
         let mut server = VoiceServer::new(SERVER_SECRET);
-        server.add_connection(CLIENT_SECRET, "1.2.3.4:10".to_string(), Some("alice".into()));
+        server.add_connection(
+            CLIENT_SECRET,
+            "1.2.3.4:10".to_string(),
+            Some("alice".into()),
+        );
         assert_eq!(server.connection_count(), 1);
         assert_eq!(
-            server.client_by_secret(&CLIENT_SECRET).map(|c| c.player_id.as_deref()),
+            server
+                .client_by_secret(&CLIENT_SECRET)
+                .map(|c| c.player_id.as_deref()),
             Some(Some("alice"))
         );
 
         // Re-adding the same secret from a new address moves it.
-        server.add_connection(CLIENT_SECRET, "1.2.3.4:11".to_string(), Some("alice".into()));
+        server.add_connection(
+            CLIENT_SECRET,
+            "1.2.3.4:11".to_string(),
+            Some("alice".into()),
+        );
         assert_eq!(server.connection_count(), 1);
         assert!(server.client_by_address("1.2.3.4:10").is_none());
         assert!(server.client_by_address("1.2.3.4:11").is_some());
@@ -354,7 +357,10 @@ mod tests {
         assert!(server.client_by_secret(&CLIENT_SECRET).is_none());
         assert_eq!(server.client_by_secret(&other).unwrap().player_id, None);
 
-        assert_eq!(server.remove_connection(&other).map(|c| c.address), Some("1.2.3.4:11".to_string()));
+        assert_eq!(
+            server.remove_connection(&other).map(|c| c.address),
+            Some("1.2.3.4:11".to_string())
+        );
         assert_eq!(server.connection_count(), 0);
         assert!(server.remove_connection(&other).is_none());
     }
@@ -362,7 +368,11 @@ mod tests {
     #[test]
     fn player_audio_is_relayed_to_other_clients_under_their_own_secret() {
         let mut server = VoiceServer::new(SERVER_SECRET);
-        server.add_connection(CLIENT_SECRET, "1.1.1.1:10".to_string(), Some("alice".into()));
+        server.add_connection(
+            CLIENT_SECRET,
+            "1.1.1.1:10".to_string(),
+            Some("alice".into()),
+        );
         let bob_secret = Uuid::from_u128(0xbbbb);
         server.add_connection(bob_secret, "2.2.2.2:20".to_string(), Some("bob".into()));
 
