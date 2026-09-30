@@ -16,10 +16,11 @@ Two crates, one workspace:
   `pumpkin-plugin-api::Plugin` trait, runs the UDP data plane in-guest.
 
   Inside that crate, everything that is *not* Pumpkin-specific — the protocol server, the
-  state file, the socket pump, the IPC parser — is ordinary Rust and is covered by
-  `cargo test` on the host. Only the ABI glue (`tick.rs` and the `glue` module) names
-  `pumpkin-plugin-api`, and that dependency is declared for `target_os = "wasi"` only.
-  See rule 6 for why that is load-bearing.
+  config, the control-plane state machine, the state file, the socket pump, the IPC parser —
+  is ordinary Rust and is covered by `cargo test` on the host. Only the ABI glue
+  (`channel.rs`, `tick.rs` and the `glue` module) names `pumpkin-plugin-api`, and that
+  dependency is declared for `target_os = "wasi"` only. See rule 6 for why that is
+  load-bearing.
 
 ## 2. Non-negotiable rules
 
@@ -63,7 +64,7 @@ Two crates, one workspace:
    `wasm32-wasip2` code does not link in native tests; keep the component build isolated.
    Concretely: `pumpkin-plugin-api` is declared under
    `[target.'cfg(target_os = "wasi")'.dependencies]`, and every line that names it lives in
-   `tick.rs` or the `glue` module of `lib.rs`.
+   `channel.rs`, `tick.rs` or the `glue` module of `lib.rs` — all three are `cfg`-gated.
 
    This is not a preference. The API generates the component's guest exports, whose symbol
    names are WIT-mangled (`pumpkin:plugin/metadata@0.1.0#get-metadata`). rustc lists the
@@ -192,40 +193,60 @@ fixing the disagreement is part of your change.
 
 ## 10. Current work queue
 
-1. **The connect → ping → relay path is complete end to end.** The `Plugin` impl, the
-   `plasmo:voice/v2` IPC control plane, the in-guest UDP server (`network.udp.bind`), the
-   keep-alive/timeout sweep and persistence into `context.get_data_folder()` are all in
-   place. `server.rs` owns the protocol logic: a player registry mirroring upstream's
-   `secretByPlayerId` / `playerIdBySecret`, a per-secret/per-address connection table, audio
-   fan-out, and the `NettyUdpKeepAlive` behaviour.
+1. **The connect → config → relay path is complete end to end.** The `Plugin` impl, the
+   in-guest UDP server (`network.udp.bind`), the keep-alive/timeout sweep and persistence
+   into `context.get_data_folder()` are all in place.
 
-   **The control plane is IPC**, because upstream's control plane is the Minecraft
-   plugin-message channel and IPC is what a Pumpkin plugin has instead. `player-connect`
-   mints a player's secret and replies with the encoded clientbound `ConnectionPacket`; the
-   UDP connection is created by that player's first datagram, exactly as
-   `NettyPacketHandler` does it. **An unregistered secret is dropped without a reply** —
-   never relax that to "register anyone who pings", or a public UDP port becomes an open
-   audio relay.
+   **The control plane runs in-guest over the Minecraft plugin-message channel**
+   (`plasmo:voice`), which is the transport upstream itself uses — not IPC. Pumpkin 0.2.0
+   exposes both halves (`PlayerCustomPayloadEvent` / `java-player::send-custom-payload`), so
+   there is no companion plugin and no IPC hop in the voice path. Module split:
 
-   Two invariants in `server.rs` that look like bugs if you do not know the upstream:
+   * `channel.rs` — the only module that names the channel API. Host events in,
+     `Outbound` messages out.
+   * `control.rs` — the state machine: the three-phase handshake (`PlayerInfoRequestPacket`
+     with 1/3/5/10/15 s retries → version gates → `ConnectionPacket`), the registration
+     burst (`ConfigPacket` → `PlayerListPacket` → `PlayerInfoUpdatePacket`), and every
+     serverbound packet's reply.
+   * `config.rs` — the advertised `ConfigPacket` and the version/distance rules.
+   * `server.rs` — the UDP semantics: per-connection secrets, proximity-filtered fan-out,
+     keep-alive.
+
+   The `plasmo:voice/v2` IPC namespace remains as an optional *programmatic* front door
+   (there are still tests that drive it); it is no longer how a real client connects.
+
+   Invariants in `server.rs` that look like bugs if you do not know the upstream:
+   * **An unregistered secret is dropped without a reply** — never relax that to "register
+     anyone who pings", or a public UDP port becomes an open audio relay.
+   * **The first datagram of a session is only a registration.** It creates the connection
+     and triggers the burst; its body is never handled or relayed, because upstream's
+     `handlePacket` sits in the branch that datagram does not take.
    * the server **never answers a ping** — a real client answers *any* inbound ping with
      another ping, so echoing pings back ping-pongs without bound. The server sends its own
-     keep-alive pings instead, and that first ping is what makes a client "connected".
+     keep-alive pings instead (immediately, then every 2.5–4 s); a client goes soft-dead
+     after 7 s without one and drops the connection at 30 s.
    * a client that changes UDP address is *followed* (`setRemoteAddress`), not duplicated.
+   * a ping's `serverIp` / `serverPort` is **informational** (`connectionAddress`); the send
+     target is always the address the datagram arrived from (`remoteAddress`). Swapping the
+     two makes the server talk to itself.
+   * audio is relayed as a **new** `SourceAudioPacket` per listener (same payload bytes, the
+     listener's own secret, a fresh timestamp), never as the inbound `PlayerAudioPacket`.
 2. Integration coverage lives in two files under `crates/plasmo-voice-plugin/tests/`:
    `lifecycle.rs` drives whole sessions through the public API (control message → minted
-   secret → decoded `ConnectionPacket` → UDP registration → audio fan-out → keep-alive →
-   disconnect), and `socket.rs` runs the same relay over three real `UdpSocket`s so the
-   receive loop, the address parsing and the send path are covered too — that is where a
-   `parse::<SocketAddr>` mistake would silently drop every outgoing frame while the unit
-   tests stayed green. Keep the WASI-only glue thin so this stays possible: anything
-   host-testable (for example `player_connect_reply`, the reply builder) belongs in
+   secret → decoded `ConnectionPacket` → UDP registration → registration burst → proximity
+   relay → keep-alive → disconnect), and `socket.rs` runs the same relay over three real
+   `UdpSocket`s so the receive loop, the address parsing and the send path are covered too —
+   that is where a `parse::<SocketAddr>` mistake would silently drop every outgoing frame
+   while the unit tests stayed green. Keep the WASI-only glue thin so this stays possible:
+   anything host-testable (for example `player_connect_reply`, the reply builder) belongs in
    `lib.rs` **outside** the `cfg` gate.
 3. Known gaps, in the order they matter (all documented in `README.md` under "What is not
-   implemented yet"): the post-registration control-plane burst (`ConfigPacket`,
-   `PlayerListPacket`, `PlayerInfoUpdatePacket`) is not sent; audio fan-out is a broadcast
-   rather than upstream's activation/position filtering; `SourceAudio` and `SelfAudioInfo`
-   are dropped; and the remaining control-plane packets have no plugin-side handler. Do not
-   describe the plugin as "fully compatible" while those are open.
+   implemented yet"): `ConfigPacket.encryption` is `null`, so **audio is plaintext** (no RSA
+   in the guest yet); only the proximity activation and source line exist, with no TOML
+   config; permissions and `canSee`/vanish are not enforced; there is no server-side mute
+   manager; positions come from `PlayerMoveEvent` rather than live world reads; and the
+   decoration packets (`ConfigPlayerInfo`, `DistanceVisualize`, `AnimatedActionBar`, the
+   addon/entity/static source variants) are not sent. Do not describe the plugin as "fully
+   compatible" while those are open.
 4. **Keep this file and `README.md` in sync with reality.** If a claim in either document
    is wrong, fixing it is part of your change.

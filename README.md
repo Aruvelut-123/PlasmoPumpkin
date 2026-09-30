@@ -23,8 +23,8 @@ The project is a Cargo workspace with two crates:
 | Area | State |
 | --- | --- |
 | `plasmo-voice-core` wire format (UDP + 26 TCP packets + data models) | ✅ implemented, 39 tests |
-| `plasmo-voice-plugin` (Pumpkin component) | ✅ UDP voice server with a working control plane — 34 unit tests + 3 session + 2 socket tests |
-| Native tests (`cargo test --workspace`) | ✅ 78 tests passing |
+| `plasmo-voice-plugin` (Pumpkin component) | ✅ UDP voice server with the full control plane over `plasmo:voice` — 62 unit tests + 3 session + 2 socket tests |
+| Native tests (`cargo test --workspace`) | ✅ 106 tests passing |
 | `wasm32-wasip2` component build | ✅ verified: a component (layer `0x0d`) exporting all six host entry points |
 | Lint & format (`cargo fmt`, `cargo clippy -D warnings`) | ✅ clean on the host **and** on `wasm32-wasip2` |
 | CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) | ✅ four jobs: `core`, `policy`, `plugin`, `hygiene` |
@@ -34,21 +34,37 @@ The project is a Cargo workspace with two crates:
 Upstream Plasmo Voice has **no TCP listener**: the 26 "TCP" packets travel over the
 Minecraft plugin-message channel (`ServerChannelHandler` decodes them from plugin-message
 bytes with `PacketDirection.SERVER`), and only UDP is a real socket. A player's session is
-established like this:
+established in three phases:
 
-1. the server mints a secret for the player — `VoiceUdpServerConnectionManager
-   .getSecretByPlayerId` is the only place `secretByPlayerId` / `playerIdBySecret` are
-   filled (`UUID.randomUUID()` per session, in memory);
-2. it sends the client a clientbound `ConnectionPacket(secret, ip, port)` over the control
-   plane, telling it where the UDP socket lives and which secret to speak with;
-3. the client pings over UDP until it hears back; on the **first datagram whose secret is
-   known**, `NettyPacketHandler` creates the UDP connection (`addConnection`) and answers
-   with the config / player-list burst;
-4. any datagram whose secret is *not* known is dropped without a reply.
+1. **Join.** The server asks the client who it is with a clientbound
+   `PlayerInfoRequestPacket` (id 2), retrying at +1/3/5/10/15 s until an answer arrives.
+2. **Answer.** The client replies with `PlayerInfoPacket` (id 10): its mod version and an
+   RSA public key. The server gates on the *major* version (and a `2.0.0` minimum), mints
+   the player's secret with `VoiceUdpServerConnectionManager.getSecretByPlayerId`, and
+   replies with a clientbound `ConnectionPacket(secret, ip, port)` (id 1).
+3. **Registration.** The client pings over UDP until it hears back. On the **first
+   datagram whose secret is known**, `NettyPacketHandler` creates the UDP connection and
+   answers with the registration burst: `ConfigPacket` (id 3) → `PlayerListPacket` (id 7) →
+   `PlayerInfoUpdatePacket` (id 8), in that order. Any datagram whose secret is *not* known
+   is dropped without a reply, and the first datagram of a session is **only** a
+   registration — its body is never handled or relayed, exactly as upstream skips
+   `handlePacket` on that path.
 
-This plugin reproduces that model with **IPC as the control plane**, because that is what a
-Pumpkin plugin has instead of the Minecraft channel. `plasmo:voice/v2` therefore has four
-commands:
+This plugin implements all of that **in-guest over the `plasmo:voice` plugin-message
+channel** — the same channel upstream uses. Pumpkin 0.2.0 hands a plugin both halves of the
+mechanism (`PlayerCustomPayloadEvent` in, `java-player::send-custom-payload` out), so there
+is no companion plugin, no proxy and no IPC hop in the voice path:
+
+| Module | Role |
+| --- | --- |
+| [`channel.rs`](crates/plasmo-voice-plugin/src/channel.rs) | the ABI shim: host events in, `Outbound` messages out. The only module that names the Pumpkin channel API. |
+| [`control.rs`](crates/plasmo-voice-plugin/src/control.rs) | the state machine: the handshake, the burst, and every serverbound packet's reply. Host-testable, no Pumpkin types. |
+| [`config.rs`](crates/plasmo-voice-plugin/src/config.rs) | the `ConfigPacket` this server advertises, and the version/distance gates. |
+| [`server.rs`](crates/plasmo-voice-plugin/src/server.rs) | the UDP semantics: per-connection secrets, activation- and position-filtered fan-out, keep-alive. |
+
+The control plane is **not** IPC. The `plasmo:voice/v2` IPC namespace still exists as an
+optional *programmatic* front door for other plugins or scripts (it can drive a session
+without a real client):
 
 | Message | Reply |
 | --- | --- |
@@ -58,10 +74,36 @@ commands:
 | `plasmo:voice/v2\nplayer-disconnect\nplayer=<uuid>` | `player`, `secret` (forgotten), `players` |
 
 `packet=<hex>` is the encoded clientbound `ConnectionPacket`, ready to forward to that
-player's client verbatim; it is `packet=none` when no `ip=` was supplied, because a plugin
-has no public address of its own to advertise and inventing `0.0.0.0` would point every
-client at nothing. **Nothing else can create a connection** — an unregistered secret is
-dropped on sight, so a public UDP port never relays a stranger's audio.
+player's client verbatim; it is `packet=none` when no `ip=` was supplied. **Nothing else can
+create a connection** — an unregistered secret is dropped on sight, so a public UDP port
+never relays a stranger's audio.
+
+### How audio is relayed
+
+Upstream's relay is a proximity fan-out, not a broadcast, and the plugin reproduces it:
+
+* A serverbound `PlayerAudioPacket` (UDP id 2) is **never forwarded as-is**. The server
+  builds a clientbound `SourceAudioPacket` (id 3) for every listener in range — same
+  sequence number, same payload bytes (the Opus frame is not re-encoded), tagged with the
+  speaker's stable *source id* — and a `SelfAudioInfoPacket` (id 4) for the speaker itself,
+  whose overlay needs to know its own stream is live.
+* Every recipient gets a frame re-keyed to **its own** secret with a fresh timestamp,
+  because those live in the per-client part of the envelope.
+* The distance is clamped exactly like `Activation.calculateAllowedDistance` (the proximity
+  activation allows 8/16/32 blocks and defaults to 16), and the radius is
+  `min(distance + maxExtraAudioBroadcastDistance, distance * 2)` — 32 blocks at the default
+  distance.
+* A listener hears the speaker only if it has voice chat on, is in the same world, is within
+  the radius, and is not the speaker. An unknown position or world means "cannot verify", so
+  the frame is **not** relayed.
+* `PlayerAudioEndPacket` (over the control plane) becomes a clientbound
+  `SourceAudioEndPacket` (id 18) for the same listeners, plus a `SelfSourceInfoPacket`
+  (id 17) for the speaker with `sequenceNumber = -1`.
+* A listener that hears an unknown source asks for it with `SourceInfoRequestPacket`; the
+  server answers `SourceInfoPacket` (id 16) with a `PLAYER` source carrying the speaker's
+  nick, state, proximity line and an Opus decoder.
+* `PlayerStatePacket` updates the player's mute flags and is re-broadcast as
+  `PlayerInfoUpdatePacket` (id 8) only when something actually changed.
 
 ### Ping and keep-alive semantics
 
@@ -71,34 +113,55 @@ The two directions of `PingPacket` are not symmetric, and getting that wrong is 
   answers it.** A real client replies to *any* inbound ping with another ping, so echoing
   pings back would produce an unbounded ping-pong between server and client.
 * **The server sends its own keep-alive pings** — an empty `PingPacket` (a timestamp and
-  nothing else) at most once per second per connection, with 1.5–3 s of jitter derived from
-  the secret. That first ping is also what makes a real client consider itself connected.
+  nothing else), immediately for a new connection and then every 2.5–4 s (1.5 s plus up to
+  1.5 s of jitter derived from the secret). That first ping is what makes a real client
+  consider itself connected; without a ping at all it goes soft-dead at **7 s** (it stops
+  recording) and tears the connection down at **30 s**.
+* The endpoint a client puts in its ping (`serverIp` / `serverPort`) is recorded
+  informationally, like upstream's `connectionAddress`. It is **not** a send target:
+  datagrams go to the address they arrived from (`remoteAddress`). Conflating the two would
+  make the server send audio to itself.
 * A connection that has sent nothing for `keepAliveTimeoutMs` (upstream default **15 s**) is
-  retired.
+  retired and announced with a `PlayerDisconnectPacket`, while its *registration* survives —
+  the secret is sticky, so the same client can come back with it.
+* A client that changes UDP address is *followed* (`setRemoteAddress`), never duplicated.
 
-Both are driven from the one clock the guest has: the Pumpkin tick event (see
+Both directions are driven from the one clock the guest has: the Pumpkin tick event (see
 [`crates/plasmo-voice-plugin/src/runtime.rs`](crates/plasmo-voice-plugin/src/runtime.rs)),
 since Pumpkin 0.2.0 puts no `on_tick` on the `Plugin` trait.
 
 ### What is not implemented yet
 
-The session path above is complete — a registered player's audio reaches the other
-connections — but this is not yet full upstream parity. In rough order of importance:
+The full connect → config → relay path is in place, but this is not yet complete upstream
+parity. In rough order of importance:
 
-* **The post-registration control-plane burst.** Upstream answers the first UDP datagram
-  with `sendConfigInfo` + `sendPlayerList` + `broadcastPlayerInfoUpdate`, i.e. a
-  clientbound `ConfigPacket`, `PlayerListPacket` and `PlayerInfoUpdatePacket`. This plugin
-  returns only the `ConnectionPacket`; the other codecs exist in `plasmo-voice-core` with
-  round-trip tests, but nothing wires them to the control plane yet.
-* **Audio is broadcast, not positional.** Upstream decides who receives a
-  `PlayerAudioPacket` from activations, source lines and player positions. This server fans
-  every frame out to every *other* connection: correct for one voice channel, wrong for
-  anything distance-based.
-* **Source and self audio are not relayed.** `SourceAudio` (server → clients, for non-player
-  sources) and `SelfAudioInfo` are decoded and dropped.
-* **The rest of the control plane.** `PlayerInfo`, `PlayerState`, `PlayerAudioEnd`,
-  `SourceInfo`, activations and source-line synchronisation are all implemented in the core
-  crate but have no plugin-side handler.
+* **Audio is plaintext.** Upstream RSA-encrypts a 16-byte AES key with the public key from
+  `PlayerInfoPacket` and sends it inside `ConfigPacket.encryption`. This server sends
+  `encryption: null`, which the protocol and the client both accept (a null encryption
+  means "no cipher"), so **UDP audio is not encrypted** and clients send plaintext Opus.
+  Closing this needs RSA in the guest plus a persisted AES key.
+* **Only one activation and one source line.** The proximity activation and the proximity
+  line are hard-coded from upstream's defaults; there is no TOML config, so distances,
+  sample rate, MTU, opus bitrate and `maxExtraAudioBroadcastDistance` are constants.
+  Upstream's `ActivationRegister` / `ActivationUnregister` (ids 19/20) and
+  `SourceLineRegister` / `SourceLineUnregister` (21/22) are never sent.
+* **Permissions are not enforced.** `pv.allow_freecam` is advertised and always true, as
+  upstream's default; there is no permission system, no per-player activation permissions,
+  and no `canSee` / vanish integration — a vanished player would still be heard.
+* **No server-side mute manager.** `VoicePlayerInfo.muted` is always false; only the
+  client-reported `voiceDisabled` / `microphoneMuted` are tracked.
+* **Positions come from move events.** Upstream reads positions live from the Minecraft
+  server when it computes a listener set. A guest cannot read the world behind the host
+  boundary, so `PlayerMoveEvent` and the per-move refresh push them in. A player who never
+  moves is never placed, and is therefore never a listener.
+* **No audio processing.** There is no jitter buffer, no packet reordering, no
+  packet-loss concealment and no server-side mixing: frames are forwarded as they arrive.
+  Upstream does not do this either, but its clients do.
+* **Decoration packets are not sent.** `ConfigPlayerInfoPacket` (id 4),
+  `DistanceVisualizePacket` (14), `AnimatedActionBarPacket` (23) and the addon/entity/static
+  source variants are unimplemented; `LanguagePacket` (id 6) answers with the requested
+  locale and an *empty* translation table, so the client falls back to its own keys.
+  `CustomPacket` (UDP `0x100`) is decoded but not routed to any addon.
 
 ---
 
@@ -288,10 +351,13 @@ crates/
   plasmo-voice-plugin/           the server (wasm32-wasip2 component)
     src/
       lib.rs                     crate docs, IPC parser + reply builder, the WASI-gated `glue` module
-      server.rs                  UDP voice server: player registry, auth, audio fan-out, keep-alive
+      config.rs                  the ConfigPacket this server advertises; version and distance gates
+      control.rs                 control-plane state machine: handshake, registration burst, replies
+      server.rs                  UDP voice server: player registry, auth, proximity audio fan-out, keep-alive
       runtime.rs                 process-global socket + protocol state, pumped once per tick
       state.rs                   secret UUID and persisted state in the plugin data folder
-      tick.rs                    `ServerTickStartEvent` bridge (WASI only)
+      channel.rs                 the `plasmo:voice` plugin-message channel (WASI only)
+      tick.rs                    `ServerTickStartEvent` bridge, socket pump + control delivery (WASI only)
     tests/
       lifecycle.rs               end-to-end sessions: control message → encoded packet → relayed audio
       socket.rs                  the same relay over three real UDP sockets (server + two clients)
