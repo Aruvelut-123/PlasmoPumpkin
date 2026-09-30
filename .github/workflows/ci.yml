@@ -115,6 +115,10 @@ jobs:
   # No checkout/vendor step is needed: the plugin's `pumpkin-plugin-api`
   # dependency is a git tag, so cargo fetches the API (and the exact pinned
   # commit) by itself.
+  #
+  # The ABI glue is gated on `target_os = "wasi"` (see the crate docs), so the
+  # host jobs above never compile it. That is why the lint step here matters:
+  # this job is the only place the `Plugin` impl is type-checked and linted.
   # ---------------------------------------------------------------------------
   plugin:
     name: plugin (wasm32-wasip2 component)
@@ -126,11 +130,20 @@ jobs:
       - name: Install toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
+          components: clippy
           targets: wasm32-wasip2
 
       - uses: Swatinem/rust-cache@v2
         with:
           key: wasip2
+
+      - name: Clippy (WASI-only ABI glue)
+        run: |
+          cargo clippy \
+            --target wasm32-wasip2 \
+            -p plasmo-voice-plugin \
+            --all-targets \
+            -- -D warnings
 
       - name: Build component
         run: |

@@ -13,6 +13,10 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # Protocol core: the single source of truth for everything on the wire.
 plasmo-voice-core = { path = "../plasmo-voice-core" }
+uuid = "1"
+tracing = "0.1"
+
+[target.'cfg(target_os = "wasi")'.dependencies]
 # Pumpkin plugin ABI. `pumpkin-plugin-api` runs `wit_bindgen::generate!` for us —
 # a plugin must never call it itself.
 #
@@ -23,6 +27,21 @@ plasmo-voice-core = { path = "../plasmo-voice-core" }
 # mirrors — a mirror that has not synced the 0.2.0 release is a common failure
 # mode for anyone behind one (the mirror only carries 0.1.0-dev). The tag also
 # names the exact commit the API was verified against.
+#
+# WASI-ONLY, and that is load-bearing. The API crate generates the component's
+# guest exports (`impl wit::Guest for Component` and friends, marked with
+# `#[unsafe(export_name = ...)]`). Those names are WIT-mangled, e.g.
+# "pumpkin:plugin/metadata@0.1.0#get-metadata". For a `cdylib`, rustc hands the
+# linker an ELF *version script* listing every exported symbol, and a version
+# script cannot contain `:`, `@` or `#` — so linking this crate for a native
+# target dies with:
+#
+#     rust-lld: error: list:10: ; expected, but got :
+#         cabi_post_pumpkin:plugin/metadata@0.1.0#get-metadata;
+#
+# Restricting the dependency to WASI keeps the component ABI out of the host
+# build, which is exactly what AGENTS.md rule 6 asks for, and what makes
+# `cargo test --workspace` work natively. The plugin's own host-testable logic
+# (the protocol server, the state format, the socket pump) has no Pumpkin
+# dependency and is covered by the unit tests in this crate.
 pumpkin-plugin-api = { git = "https://github.com/Pumpkin-MC/Pumpkin", tag = "0.2.0+26.3-26.51" }
-uuid = "1"
-tracing = "0.1"

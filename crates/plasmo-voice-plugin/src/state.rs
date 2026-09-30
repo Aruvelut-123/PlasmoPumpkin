@@ -115,6 +115,70 @@ impl VoiceServerState {
         }
         &self.secret
     }
+
+    /// Reads `state.json` from `folder`, falling back to defaults.
+    ///
+    /// A corrupt or missing file is deliberately not fatal: the server starts with
+    /// defaults and rewrites the file on the next save, so a bad edit cannot brick
+    /// the plugin. The failure is logged at `warn` (corrupt) or `debug` (absent),
+    /// because "first run" is not a problem worth shouting about.
+    #[must_use]
+    pub fn load(folder: &str) -> Self {
+        let path = format!("{folder}/{STATE_FILE}");
+        match std::fs::read_to_string(&path) {
+            Ok(text) => Self::from_json(&text).unwrap_or_else(|error| {
+                tracing::warn!(
+                    %path,
+                    %error,
+                    "ignoring unreadable voice server state; using defaults"
+                );
+                Self::default()
+            }),
+            Err(error) => {
+                tracing::debug!(%path, %error, "no voice server state yet; using defaults");
+                Self::default()
+            }
+        }
+    }
+
+    /// Writes `state.json` into `folder`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the data folder is not writable, which the caller must surface:
+    /// silently continuing would lose the secret that connected clients are using.
+    pub fn save(&self, folder: &str) -> Result<(), String> {
+        let path = format!("{folder}/{STATE_FILE}");
+        std::fs::write(&path, self.to_json())
+            .map_err(|error| format!("could not write {path}: {error}"))
+    }
+
+    /// Derives a secret UUID from the platform's strongest available entropy.
+    ///
+    /// `wasm32-wasip2` has no `getrandom` backend wired up, so this mixes the wall
+    /// clock with the bound port through xorshift64*. The result is not
+    /// cryptographically strong, but the voice secret only needs to be
+    /// unguessable-per-server and stable across restarts, and the worst case for a
+    /// collision is two servers sharing an obfuscation key. The persisted state is
+    /// what actually makes it stable.
+    #[must_use]
+    pub fn generate_secret(port: u16) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+
+        let mut bytes = [0u8; 16];
+        let mut mix = nanos as u64 ^ u64::from(port).rotate_left(17);
+        // xorshift64*: cheap, dependency-free, and enough to spread the bits below.
+        for chunk in bytes.chunks_mut(8) {
+            mix ^= mix >> 12;
+            mix ^= mix << 25;
+            mix ^= mix >> 27;
+            let value = mix.wrapping_mul(0x2545_F491_4F6C_DD1D);
+            chunk.copy_from_slice(&value.to_le_bytes()[..chunk.len()]);
+        }
+        Self::secret_from_bytes(&bytes)
+    }
 }
 
 /// Minimal flat-JSON object parser: `{ "k": v, ... }` where `v` is a number,

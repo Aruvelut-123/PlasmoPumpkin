@@ -234,6 +234,28 @@ pub fn with_runtime<T>(f: impl FnOnce(&mut VoiceRuntime) -> T) -> T {
     f(&mut guard)
 }
 
+/// Binds the UDP voice socket on `port`, returning it and the actual port.
+///
+/// Port `0` asks the OS for an ephemeral port, which is what a first run wants
+/// before the real port is known: the caller persists whatever comes back so the
+/// next load listens on the same one. The socket is put in non-blocking mode
+/// because the pump must never stall a server tick.
+///
+/// # Errors
+///
+/// Fails when the port is taken or the host policy denies `network.udp.bind`.
+pub fn bind(port: u16) -> Result<(UdpSocket, u16), String> {
+    let socket = UdpSocket::bind(("0.0.0.0", port))
+        .map_err(|error| format!("could not bind UDP 0.0.0.0:{port}: {error}"))?;
+    socket
+        .set_nonblocking(true)
+        .map_err(|error| format!("could not set the voice socket non-blocking: {error}"))?;
+    let local = socket
+        .local_addr()
+        .map_err(|error| format!("could not query the voice socket address: {error}"))?;
+    Ok((socket, local.port()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

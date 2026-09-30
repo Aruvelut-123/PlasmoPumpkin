@@ -28,10 +28,6 @@ jobs:
         with:
           key: wasip2-release
 
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-component
-
       # `pumpkin-plugin-api` is a git-tag dependency, so the Pumpkin API is
       # fetched by cargo itself. Only the tag itself is asserted here.
       - name: Check pinned Pumpkin API
@@ -39,15 +35,17 @@ jobs:
           set -euo pipefail
           grep -E '^\s*pumpkin-plugin-api\s*=' crates/plasmo-voice-plugin/Cargo.toml
 
+      # wasm32-wasip2 already emits a component, so this is a plain build.
+      # (`cargo-component` 0.21.1 cannot decode its own wit-bindgen 0.62 output.)
       - name: Build component
-        run: cargo component build --target wasm32-wasip2 -p plasmo-voice-plugin --release
+        run: cargo build --target wasm32-wasip2 -p plasmo-voice-plugin --release
 
       - name: Verify component shape
         run: |
           set -euo pipefail
-          wasm=$(find target/wasm32-wasip2/release -maxdepth 1 -name '*.wasm' -type f | head -n1)
-          if [ -z "$wasm" ]; then
-            echo "::error title=No component produced::cargo-component emitted no .wasm under target/wasm32-wasip2/release"
+          wasm=target/wasm32-wasip2/release/plasmo_voice_plugin.wasm
+          if [ ! -f "$wasm" ]; then
+            echo "::error title=No component produced::cargo build emitted no $wasm"
             exit 1
           fi
           python3 - "$wasm" <<'PY'
