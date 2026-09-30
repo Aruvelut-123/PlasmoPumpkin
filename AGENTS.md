@@ -198,19 +198,28 @@ fixing the disagreement is part of your change.
    into `context.get_data_folder()` are all in place.
 
    **The control plane runs in-guest over the Minecraft plugin-message channel**
-   (`plasmo:voice`), which is the transport upstream itself uses — not IPC. Pumpkin 0.2.0
-   exposes both halves (`PlayerCustomPayloadEvent` / `java-player::send-custom-payload`), so
-   there is no companion plugin and no IPC hop in the voice path. Module split:
+   (`plasmo:voice/v2`, upstream's `BaseVoiceServer.CHANNEL_STRING`), which is the transport
+   upstream itself uses — not IPC. Pumpkin 0.2.0 exposes both halves
+   (`PlayerCustomPayloadEvent` / `java-player::send-custom-payload`), so there is no
+   companion plugin and no IPC hop in the voice path. Module split:
 
    * `channel.rs` — the only module that names the channel API. Host events in,
      `Outbound` messages out.
    * `control.rs` — the state machine: the three-phase handshake (`PlayerInfoRequestPacket`
      with 1/3/5/10/15 s retries → version gates → `ConnectionPacket`), the registration
      burst (`ConfigPacket` → `PlayerListPacket` → `PlayerInfoUpdatePacket`), and every
-     serverbound packet's reply.
-   * `config.rs` — the advertised `ConfigPacket` and the version/distance rules.
-   * `server.rs` — the UDP semantics: per-connection secrets, proximity-filtered fan-out,
-     keep-alive.
+     serverbound packet's reply. The channel name lives here too, because `channel.rs` is
+     `cfg`-gated to WASI and its code is therefore never unit-tested on the host.
+
+   Two failure modes in this area are silent from both ends, so do not "simplify" either
+   away:
+
+   * The channel name must stay exactly `plasmo:voice/v2`. The client subscribes to that
+     string; a payload on `plasmo:voice` is dropped without an error on either side, and the
+     client reports the server as having no voice plugin.
+   * The handshake starts on **`PlayerJoinEvent`**. The client never announces the channel
+     — it only answers `PlayerInfoRequestPacket` — so a channel-registration trigger can
+     wait forever. `ChannelRegisterHandler` is a secondary trigger, not the primary one.
 
    The `plasmo:voice/v2` IPC namespace remains as an optional *programmatic* front door
    (there are still tests that drive it); it is no longer how a real client connects.

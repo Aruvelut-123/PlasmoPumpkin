@@ -76,6 +76,11 @@ pub struct VoiceRuntime {
     /// is exactly the right answer for a server whose voice port sits on the same machine
     /// — and it is the only answer a guest can give without knowing its own public IP.
     advertised_ip: String,
+    /// Failed sends. Only the first is reported at `warn` (see [`send_datagrams`]).
+    send_failures: u64,
+    /// Whether the first tick has been announced, so a host that never ticks is
+    /// noticeable from a log that only contains the load line.
+    pump_announced: bool,
 }
 
 /// One unanswered `PlayerInfoRequestPacket`.
@@ -108,6 +113,8 @@ impl VoiceRuntime {
             control: Vec::new(),
             waiting_info: Vec::new(),
             advertised_ip: "0.0.0.0".to_string(),
+            send_failures: 0,
+            pump_announced: false,
         }
     }
 
@@ -209,6 +216,9 @@ impl VoiceRuntime {
         self.protocol = None;
         self.control.clear();
         self.waiting_info.clear();
+        // A reload gets its own listening period, so the "the pump is running" line is
+        // emitted again for it.
+        self.pump_announced = false;
         std::mem::take(&mut self.data_folder)
     }
 
@@ -270,6 +280,20 @@ impl VoiceRuntime {
             return (0, 0);
         };
 
+        // The tick pump is the data plane's only clock: if the host never calls this
+        // handler, the socket is never drained and no ping is ever sent, which a real
+        // client reports as "Can't connect to the UDP server". Saying so once turns the
+        // hardest failure in the whole plugin into a single missing log line.
+        if !self.pump_announced {
+            self.pump_announced = true;
+            let port = socket.local_addr().map(|address| address.port()).ok();
+            tracing::info!(
+                ?port,
+                "the voice tick pump is running: the UDP socket on port {:?} is being drained",
+                port
+            );
+        }
+
         let mut received = 0u64;
         let mut sent = 0u64;
         let mut buffer = [0u8; RECV_BUFFER];
@@ -289,7 +313,7 @@ impl VoiceRuntime {
             received += 1;
 
             let handled = protocol.handle_datagram(&from.to_string(), &buffer[..len]);
-            sent += send_datagrams(socket, handled.outgoing);
+            sent += send_datagrams(socket, handled.outgoing, &mut self.send_failures);
             control.extend(handled.control);
         }
 
@@ -300,12 +324,20 @@ impl VoiceRuntime {
         // The cadence matters more than it looks: a Plasmo Voice client treats itself as
         // `connected` only while it keeps *receiving* pings, goes soft-dead after 7s
         // without one (it stops sending audio) and tears the whole connection down at
-        // 30s. The sweep pings a new connection immediately and then every 2.5-4s, which
+        // 30s. The sweep pings a new connection immediately and then every 1.5-3s, which
         // sits comfortably inside that window.
         let sweep = protocol.keep_alive(now_ms(), timeout_ms);
-        sent += send_datagrams(socket, sweep.outgoing);
+        sent += send_datagrams(socket, sweep.outgoing, &mut self.send_failures);
         control.extend(sweep.control);
         self.control.extend(control);
+
+        // A timed-out connection is not the end of the session: upstream re-asks the
+        // player for its info, which sends a fresh `ConnectionPacket` and lets a client
+        // whose UDP path broke recover without rejoining. Doing the same here is what
+        // keeps a momentary network blip from requiring a reconnect.
+        for player in sweep.timed_out_players {
+            self.request_player_info(player, now_ms());
+        }
 
         // `PlayerInfoRequestPacket` retries, on the same clock as everything else.
         self.schedule_info_requests(now_ms());
@@ -352,20 +384,39 @@ impl Default for VoiceRuntime {
 ///
 /// Split out of [`VoiceRuntime::pump`] because both the reply path and the
 /// keep-alive sweep send through it.
-fn send_datagrams(socket: &UdpSocket, outgoing: Vec<Outgoing>) -> u64 {
+///
+/// A send failure is *not* automatically benign. Losing an audio frame to
+/// congestion is normal, but the host denying `network.udp.outgoing-datagram`
+/// (or `network.udp.connect`) fails *every* send, and from the client's side that
+/// is indistinguishable from "the server is not running" — its symptom is exactly
+/// the client's "Can't connect to the UDP server" screen. So the first failure is
+/// reported at `warn` and the rest at `debug`: loud enough to diagnose, quiet
+/// enough to survive a lossy link.
+fn send_datagrams(socket: &UdpSocket, outgoing: Vec<Outgoing>, failures: &mut u64) -> u64 {
     let mut sent = 0u64;
     for datagram in outgoing {
         match datagram.to.parse::<SocketAddr>() {
             Ok(target) => match socket.send_to(&datagram.data, target) {
                 Ok(_) => sent += 1,
                 Err(error) => {
-                    // A dropped voice frame is expected under congestion and is
-                    // not worth a warning: audio tolerates loss by design.
-                    tracing::trace!(%error, peer = %datagram.to, "voice send failed");
+                    if *failures == 0 {
+                        tracing::warn!(
+                            %error,
+                            peer = %datagram.to,
+                            bytes = datagram.data.len(),
+                            "voice send to {} failed: {error}. If this repeats for every \
+                             packet, the host is denying the plugin's network.udp \
+                             permissions",
+                            datagram.to
+                        );
+                    } else {
+                        tracing::debug!(%error, peer = %datagram.to, "voice send failed");
+                    }
+                    *failures = failures.saturating_add(1);
                 }
             },
             Err(error) => {
-                tracing::debug!(%error, peer = %datagram.to, "could not parse peer address");
+                tracing::warn!(%error, peer = %datagram.to, "could not parse a peer address");
             }
         }
     }

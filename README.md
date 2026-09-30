@@ -23,8 +23,8 @@ The project is a Cargo workspace with two crates:
 | Area | State |
 | --- | --- |
 | `plasmo-voice-core` wire format (UDP + 26 TCP packets + data models) | ✅ implemented, 39 tests |
-| `plasmo-voice-plugin` (Pumpkin component) | ✅ UDP voice server with the full control plane over `plasmo:voice` — 63 unit tests + 3 session + 2 socket tests |
-| Native tests (`cargo test --workspace`) | ✅ 107 tests passing |
+| `plasmo-voice-plugin` (Pumpkin component) | ✅ UDP voice server with the full control plane over `plasmo:voice/v2` — 65 unit tests + 3 session + 2 socket tests |
+| Native tests (`cargo test --workspace`) | ✅ 109 tests passing |
 | `wasm32-wasip2` component build | ✅ verified: a component (layer `0x0d`) exporting all six host entry points |
 | Lint & format (`cargo fmt`, `cargo clippy -D warnings`) | ✅ clean on the host **and** on `wasm32-wasip2` |
 | CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) | ✅ four jobs: `core`, `policy`, `plugin`, `hygiene` |
@@ -50,7 +50,7 @@ established in three phases:
    registration — its body is never handled or relayed, exactly as upstream skips
    `handlePacket` on that path.
 
-This plugin implements all of that **in-guest over the `plasmo:voice` plugin-message
+This plugin implements all of that **in-guest over the `plasmo:voice/v2` plugin-message
 channel** — the same channel upstream uses. Pumpkin 0.2.0 hands a plugin both halves of the
 mechanism (`PlayerCustomPayloadEvent` in, `java-player::send-custom-payload` out), so there
 is no companion plugin, no proxy and no IPC hop in the voice path:
@@ -327,9 +327,79 @@ out of sync with them.
    | `fs.read.data` / `fs.write.data` | Persist server state (secret UUID, activations, source lines) in the plugin data folder. |
    | `network.dns` | Only if hostnames are resolved. |
 
+   **On a headless server, grant them up front.** Pumpkin decides plugin permissions in
+   this order: an `allowed_permissions` entry (`[plugins]`, or a
+   `[plugins.overrides."<name>"]` block) approves without asking; otherwise a cached
+   decision in `plugins/permission_cache.json` is reused; otherwise, if
+   `plugins.ask_permission_confirmation = false`, everything is auto-approved; otherwise
+   the host prompts on the console. A server started without a TTY **cannot prompt**, so
+   the prompt fails and the denial is cached:
+
+   ```
+   [WARN] Console readline is not available; cannot prompt for plugin "plasmo-voice" permissions
+   [WARN] Permission denied for plugin "plasmo-voice", skipping loading.
+   ```
+
+   That means *the plugin is not running at all*. The denial is cached per plugin and
+   survives restarts and even plugin updates, so clear `plugins/permission_cache.json` or
+   pre-approve:
+
+   ```toml
+   [plugins]
+   enabled = true
+   ask_permission_confirmation = false
+   allowed_permissions = [
+       "network.udp",
+       "network.udp.connect",
+       "network.udp.outgoingdatagram",
+       "fs.read.data",
+       "fs.write.data",
+   ]
+   ```
+
+   A loaded voice server always prints its bound port at startup:
+
+   ```
+   [INFO] the Plasmo Voice server is listening on UDP port 51572 (tick handler 0, channel handlers [1, 2, 3, 4, 5])
+   ```
+
+   If that line is missing, nothing else about voice matters yet.
+
 3. Make sure the global `plugins.loopback_only` config is **`false`** (the default).
    With `loopback_only = true` the guest socket is restricted to the loopback interface
    and clients on other machines will not reach the voice server.
+
+4. Make sure the **voice UDP port** — the one the startup line prints — is reachable by
+   your players. It is a second, separate port: forwarding only the Minecraft TCP port is
+   not enough, and a host panel's firewall usually has to be told about UDP explicitly.
+   The client's message *"Cannot connect to the UDP server. It's likely that the UDP port
+   is closed."* is exactly this case.
+
+### The channel name, and why it is easy to get wrong
+
+The control plane runs on the Minecraft plugin-message channel **`plasmo:voice/v2`**
+(`BaseVoiceServer.CHANNEL_STRING`). The client registers its payload handler on that exact
+string, so anything sent to the older `plasmo:voice` name is dropped by the client with no
+error on either side: the server logs nothing unusual, and the client reports *"Plasmo
+Voice is not installed on this server"*. The name is pinned by a unit test in
+[`control.rs`](crates/plasmo-voice-plugin/src/control.rs)
+(`the_voice_channel_is_the_one_the_client_listens_on`). The legacy name is still accepted
+*inbound*, but everything this server sends goes out on `plasmo:voice/v2`.
+
+For the same reason the handshake starts on **player join**, not on a channel-registration
+event: the client never announces itself, it only answers the server's
+`PlayerInfoRequestPacket` (`ModServerConnection.handle(PlayerInfoRequestPacket)`), so
+waiting for a registration means never asking. A real client (Plasmo Voice 2.1.17) produces
+this sequence:
+
+```
+[INFO] starting the voice handshake with <player>
+[INFO] a voice client identified itself: <uuid> on <mod version> (mc <mc version>), told to use UDP <ip>:<port> …
+[INFO] a voice client opened its UDP connection from <address> (player <uuid>)
+```
+
+The client's *first* UDP datagram only registers the connection; the registration burst
+(`ConfigPacket` → `PlayerListPacket` → `PlayerInfoUpdatePacket`) is the answer to it.
 
 ---
 
@@ -356,7 +426,7 @@ crates/
       server.rs                  UDP voice server: player registry, auth, proximity audio fan-out, keep-alive
       runtime.rs                 process-global socket + protocol state, pumped once per tick
       state.rs                   secret UUID and persisted state in the plugin data folder
-      channel.rs                 the `plasmo:voice` plugin-message channel (WASI only)
+      channel.rs                 the `plasmo:voice/v2` plugin-message channel (WASI only)
       tick.rs                    `ServerTickStartEvent` bridge, socket pump + control delivery (WASI only)
     tests/
       lifecycle.rs               end-to-end sessions: control message → encoded packet → relayed audio

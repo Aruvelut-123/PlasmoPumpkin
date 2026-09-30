@@ -304,13 +304,18 @@ mod glue {
             // are written from the tick pump, and read from the payload handler.
             let channel_handlers = channel::register(&context)?;
 
+            // The values are inlined into the message on purpose: Pumpkin's non-TTY
+            // "simple logger" prints the message text only and drops every structured
+            // field, so a field-only log line is an empty log line on a headless server —
+            // exactly the server an operator has to debug from a log file.
             tracing::info!(
                 port,
                 handler_id,
                 channel_handlers = ?channel_handlers,
                 enabled = persisted.enabled,
                 protocol = plasmo_voice_core::PROTOCOL_VERSION,
-                "the Plasmo Voice server is listening"
+                "the Plasmo Voice server is listening on UDP port {port} (tick handler \
+                 {handler_id}, channel handlers {channel_handlers:?})"
             );
             Ok(())
         }

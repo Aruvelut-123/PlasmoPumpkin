@@ -96,6 +96,14 @@ pub const KEEP_ALIVE_INTERVAL_MS: u64 = 1_000;
 /// Upstream `VoiceServerConfig.keepAliveTimeoutMs` defaults to `15_000`.
 pub const KEEP_ALIVE_TIMEOUT_MS: u64 = 15_000;
 
+/// How many times each "this datagram is not ours" warning is emitted before the
+/// message drops to `debug`.
+///
+/// A misconfigured client retries forever and a public port gets scanned, so the
+/// warning has to be loud once and cheap thereafter — but it must exist, because
+/// "packets arrive and are silently ignored" is otherwise invisible.
+const UNKNOWN_SECRET_WARNINGS: u64 = 3;
+
 /// Milliseconds since the Unix epoch, saturating.
 ///
 /// Only keep-alive bookkeeping uses the clock, so an unreadable (or pre-epoch)
@@ -155,6 +163,13 @@ pub struct Sweep {
     pub outgoing: Vec<Outgoing>,
     /// Disconnect broadcasts for the connections the sweep retired.
     pub control: Vec<Outbound>,
+    /// Players whose *connection* timed out but whose registration survives.
+    ///
+    /// Upstream re-asks these for their info (`NettyUdpKeepAlive:48` calls
+    /// `requestPlayerInfo` right after `removeConnection(..., TIMED_OUT)`), which restarts
+    /// the handshake and hands the client a fresh `ConnectionPacket`. That is how a client
+    /// whose UDP path broke recovers without rejoining, so the runtime must see the list.
+    pub timed_out_players: Vec<Uuid>,
 }
 
 /// The Plasmo Voice UDP server.
@@ -184,6 +199,14 @@ pub struct VoiceServer {
     /// Datagrams dropped before decoding (wrong magic / bad header / unknown
     /// secret) or rejected after decoding (unknown id / wrong direction).
     dropped: u64,
+    /// How many of those were for a secret this server never issued. Kept apart
+    /// from the total because it is the one drop that proves a client reached
+    /// the socket (see the warning in [`VoiceServer::handle_datagram`]).
+    unknown_secret_drops: u64,
+    /// How many datagrams were not Plasmo Voice packets at all.
+    malformed_drops: u64,
+    /// Payloads that arrived on the `plasmo:voice` channel and did not decode.
+    undecodable_payloads: u64,
 }
 
 impl VoiceServer {
@@ -203,6 +226,31 @@ impl VoiceServer {
             secret_counter: 0,
             server_secret,
             dropped: 0,
+            unknown_secret_drops: 0,
+            malformed_drops: 0,
+            undecodable_payloads: 0,
+        }
+    }
+
+    /// Records a payload on the `plasmo:voice` channel that the codec refused.
+    ///
+    /// Upstream treats all three causes (unknown id, wrong direction, malformed body) as
+    /// silence, and so do we — but a *client* whose payloads consistently fail to decode
+    /// is a bug on this side, so the first few are reported loudly enough to be seen from
+    /// a server log while a client sits there looking connected.
+    pub fn note_undecodable_payload(&mut self, player: Uuid, bytes: usize) {
+        self.undecodable_payloads = self.undecodable_payloads.saturating_add(1);
+        if self.undecodable_payloads <= UNKNOWN_SECRET_WARNINGS {
+            tracing::warn!(
+                %player,
+                bytes,
+                total = self.undecodable_payloads,
+                "a client ({player}) sent a {bytes}-byte voice payload that does not decode \
+                 ({} so far)",
+                self.undecodable_payloads
+            );
+        } else {
+            tracing::debug!(%player, bytes, "undecodable voice payload");
         }
     }
 
@@ -738,9 +786,18 @@ impl VoiceServer {
         }
 
         let mut control = Vec::new();
+        let mut timed_out_players = Vec::new();
         for secret in expired {
             if let Some(player_id) = self.player_for_secret(&secret) {
                 control.extend(self.control.disconnected(player_id));
+                timed_out_players.push(player_id);
+                tracing::info!(
+                    %player_id,
+                    %secret,
+                    timeout_ms,
+                    "a voice connection timed out after {timeout_ms} ms of silence; the \
+                     registration survives, so the client will be re-asked for its info"
+                );
             }
             self.remove_connection(&secret);
         }
@@ -759,7 +816,11 @@ impl VoiceServer {
             })
             .collect();
 
-        Sweep { outgoing, control }
+        Sweep {
+            outgoing,
+            control,
+            timed_out_players,
+        }
     }
 
     /// Handles one inbound datagram, returning what to send back.
@@ -783,6 +844,23 @@ impl VoiceServer {
             // Wrong magic (`Ok(None)`) or a truncated header (`Err`).
             Ok(None) | Err(_) => {
                 self.dropped = self.dropped.saturating_add(1);
+                self.malformed_drops = self.malformed_drops.saturating_add(1);
+                // A wrong magic means something reached this port that is not Plasmo
+                // Voice at all: a stray service, a scanner, or a client talking to the
+                // wrong process. Worth naming once per log level, not once per packet.
+                if self.malformed_drops <= UNKNOWN_SECRET_WARNINGS {
+                    tracing::warn!(
+                        from,
+                        bytes = data.len(),
+                        total = self.malformed_drops,
+                        "dropped a {}-byte datagram from {from}: not a Plasmo Voice packet \
+                         ({} so far)",
+                        data.len(),
+                        self.malformed_drops
+                    );
+                } else {
+                    tracing::debug!(from, bytes = data.len(), "dropped a malformed datagram");
+                }
                 return Handled::nothing();
             }
         };
@@ -798,8 +876,37 @@ impl VoiceServer {
             // connection is born, and where upstream then sends the burst.
             self.add_connection(secret, from.to_string(), Some(player_id));
             registered_now = Some(player_id);
+            // The moment the whole handshake exists for. If this line is missing from a
+            // log while a client reports "can't connect to the UDP server", the client's
+            // datagrams are not arriving at all — the fault is upstream of this plugin
+            // (address, port, firewall), not in the protocol. If it *is* present and the
+            // client still times out, the fault is on the way out: see the send-failure
+            // warning in `runtime::send_datagrams`.
+            tracing::info!(
+                %player_id,
+                %secret,
+                from,
+                "a voice client opened its UDP connection from {from} (player {player_id})"
+            );
         } else {
             self.dropped = self.dropped.saturating_add(1);
+            self.unknown_secret_drops = self.unknown_secret_drops.saturating_add(1);
+            // Datagrams whose secret this server never minted are the hardest failure to
+            // diagnose from outside: they *prove* the client reached the socket, so every
+            // "the port is closed" theory is already wrong, and yet nothing is answered.
+            // Say so for the first few, then drop to debug — a public port gets scanned.
+            if self.unknown_secret_drops <= UNKNOWN_SECRET_WARNINGS {
+                tracing::warn!(
+                    from,
+                    %secret,
+                    total = self.unknown_secret_drops,
+                    "dropped a voice datagram from {from}: secret {secret} was never issued \
+                     by this server ({} so far)",
+                    self.unknown_secret_drops
+                );
+            } else {
+                tracing::debug!(from, %secret, "dropped a voice datagram with an unknown secret");
+            }
             return Handled::nothing();
         }
 
@@ -1330,6 +1437,33 @@ mod tests {
         assert!(handled.outgoing.is_empty());
         assert!(!handled.was_ping);
         assert_eq!(server.dropped(), 1);
+    }
+
+    #[test]
+    fn a_timed_out_connection_reports_the_player_for_a_new_handshake() {
+        let mut server = VoiceServer::new(SERVER_SECRET);
+        let player = Uuid::from_u128(0xc0ffee);
+        let secret = server.register_player(player, Some("carol".into()));
+        server.add_connection(secret, "1.1.1.1:10".to_string(), Some(player));
+
+        let now = now_ms();
+        let _ = server.keep_alive(now, KEEP_ALIVE_TIMEOUT_MS);
+        let expired = server.keep_alive(now + KEEP_ALIVE_TIMEOUT_MS + 1, KEEP_ALIVE_TIMEOUT_MS);
+
+        // Upstream re-asks a timed-out player for its info
+        // (`NettyUdpKeepAlive:48`), so the runtime needs the player id, not just the
+        // disconnect broadcast.
+        assert_eq!(expired.timed_out_players, vec![player]);
+        assert_eq!(server.connection_count(), 0);
+        assert_eq!(
+            server.registered_player_count(),
+            1,
+            "only the connection died; the registration is what makes the retry possible"
+        );
+
+        // A sweep with nothing to retire reports nobody.
+        let quiet = server.keep_alive(now + KEEP_ALIVE_TIMEOUT_MS + 2, KEEP_ALIVE_TIMEOUT_MS);
+        assert!(quiet.timed_out_players.is_empty());
     }
 
     #[test]

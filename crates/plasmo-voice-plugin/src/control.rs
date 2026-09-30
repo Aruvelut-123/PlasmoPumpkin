@@ -1,11 +1,16 @@
-//! The Plasmo Voice control plane — the protocol that runs over `plasmo:voice`.
+//! The Plasmo Voice control plane — the protocol that runs over `plasmo:voice/v2`.
 //!
-//! Upstream has **no TCP listener**: `ServerChannelHandler` hands every `plasmo:voice`
+//! Upstream has **no TCP listener**: `ServerChannelHandler` hands every `plasmo:voice/v2`
 //! plugin-message payload to `PacketTcpCodec` in the SERVER direction and
 //! `VoiceTcpServerConnectionManager` answers on the same channel. This module is the Rust
 //! equivalent of that manager plus its packet handlers, with no knowledge of Pumpkin: it
 //! takes bytes and a player id, and returns the messages that must be delivered
 //! ([`Outbound`]). The ABI shim in `channel.rs` does the delivering.
+//!
+//! The channel name lives here, next to the protocol it carries, because this module is
+//! host-testable and `channel.rs` is not: a wrong channel name is a total, silent failure
+//! (the client drops every payload and reports "Plasmo Voice is not installed on this
+//! server"), so it needs a pinned assertion rather than a comment.
 //!
 //! ## The three phases of a connection
 //!
@@ -33,7 +38,28 @@ use uuid::Uuid;
 use crate::config::{ServerConfig, client_version_is_supported};
 use crate::server::VoiceServer;
 
-/// One control-plane message the caller must deliver over the `plasmo:voice` channel.
+/// The plugin-message channel Plasmo Voice 2.x speaks on.
+///
+/// This is `BaseVoiceServer.CHANNEL_STRING`, and it is exactly what the client subscribes
+/// to: `ModVoiceClient` registers its payload handler for `ModVoiceServer.CHANNEL`
+/// (`ModVoiceClient:239-242`). Sending to plain `plasmo:voice` — the 1.x name — produces no
+/// error anywhere and no traffic the client will read.
+pub const CHANNEL: &str = "plasmo:voice/v2";
+
+/// The pre-2.0 channel name, still accepted on the way in.
+///
+/// Everything this server *sends* uses [`CHANNEL`]; accepting the old name inbound costs a
+/// string comparison and turns "silent client" into "working session" for anything that
+/// still speaks it.
+pub const LEGACY_CHANNEL: &str = "plasmo:voice";
+
+/// Answers whether a channel name is one this server reads.
+#[must_use]
+pub fn is_voice_channel(channel: &str) -> bool {
+    channel == CHANNEL || channel == LEGACY_CHANNEL
+}
+
+/// One control-plane message the caller must deliver over the [`CHANNEL`] channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outbound {
     /// The player to send to, or `None` for a broadcast.
@@ -124,8 +150,10 @@ impl ControlPlane {
     ) -> Vec<Outbound> {
         let Ok(Some(packet)) = self.codec.decode(data, PacketDirection::Server) else {
             // Unknown id, an id meant for the other direction, or a malformed body: all
-            // three are silence upstream.
-            tracing::debug!(%player, bytes = data.len(), "ignoring an undecodable control payload");
+            // three are silence upstream. They are *not* all the same failure to us
+            // though — a client whose payloads never decode is a codec bug on our side,
+            // and a silent drop would hide it behind an unresponsive client.
+            server.note_undecodable_payload(player, data.len());
             return Vec::new();
         };
 
@@ -197,7 +225,10 @@ impl ControlPlane {
             port,
             client_version = %info.version,
             minecraft_version = %info.minecraft_version,
-            "a voice client identified itself"
+            "a voice client identified itself: {player} on {info} (mc {minecraft_version}), \
+             told to use UDP {ip}:{port} with secret {secret}",
+            info = info.version,
+            minecraft_version = info.minecraft_version
         );
 
         let packet = TcpPacket::Connection(ConnectionPacket {
@@ -378,6 +409,29 @@ mod tests {
 
     fn codec() -> TcpCodec {
         TcpCodec::new()
+    }
+
+    /// The channel name is upstream's, letter for letter.
+    ///
+    /// This is not cosmetic: the client registers its receiver on the exact string, and a
+    /// mismatch is invisible from both ends — the server sends happily, the client ignores
+    /// happily, and the user is told the server has no voice plugin. Hence a pinned
+    /// assertion rather than a comment.
+    #[test]
+    fn the_voice_channel_is_the_one_the_client_listens_on() {
+        assert_eq!(CHANNEL, "plasmo:voice/v2");
+        assert_eq!(LEGACY_CHANNEL, "plasmo:voice");
+        assert!(is_voice_channel(CHANNEL));
+        assert!(
+            is_voice_channel(LEGACY_CHANNEL),
+            "the pre-2.0 name is still read on the way in"
+        );
+        assert!(!is_voice_channel("plasmo:voice/v3"));
+        assert!(!is_voice_channel("plasmo:voice/v2/installed"));
+        assert!(
+            !is_voice_channel("minecraft:register"),
+            "other plugins' traffic must not be treated as voice"
+        );
     }
 
     /// A `PlayerInfoPacket` as a healthy client sends one.
