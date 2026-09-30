@@ -23,8 +23,8 @@ The project is a Cargo workspace with two crates:
 | Area | State |
 | --- | --- |
 | `plasmo-voice-core` wire format (UDP + 26 TCP packets + data models) | ✅ implemented, 39 tests |
-| `plasmo-voice-plugin` (Pumpkin component) | ✅ UDP voice server with a working control plane — 34 unit tests + 3 end-to-end session tests |
-| Native tests (`cargo test --workspace`) | ✅ 76 tests passing |
+| `plasmo-voice-plugin` (Pumpkin component) | ✅ UDP voice server with a working control plane — 34 unit tests + 3 session + 2 socket tests |
+| Native tests (`cargo test --workspace`) | ✅ 78 tests passing |
 | `wasm32-wasip2` component build | ✅ verified: a component (layer `0x0d`) exporting all six host entry points |
 | Lint & format (`cargo fmt`, `cargo clippy -D warnings`) | ✅ clean on the host **and** on `wasm32-wasip2` |
 | CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) | ✅ four jobs: `core`, `policy`, `plugin`, `hygiene` |
@@ -274,6 +274,7 @@ crates/
       tick.rs                    `ServerTickStartEvent` bridge (WASI only)
     tests/
       lifecycle.rs               end-to-end sessions: control message → encoded packet → relayed audio
+      socket.rs                  the same relay over three real UDP sockets (server + two clients)
 .github/workflows/ci.yml         the canonical build/lint/test definition
 .recon/                          reconnaissance: wire dumps, pinned-API snapshots (not built)
 ```

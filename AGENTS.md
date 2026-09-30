@@ -212,11 +212,14 @@ fixing the disagreement is part of your change.
      another ping, so echoing pings back ping-pongs without bound. The server sends its own
      keep-alive pings instead, and that first ping is what makes a client "connected".
    * a client that changes UDP address is *followed* (`setRemoteAddress`), not duplicated.
-2. Integration coverage lives in `crates/plasmo-voice-plugin/tests/lifecycle.rs`, which
-   drives whole sessions through the public API: control message → minted secret → decoded
-   `ConnectionPacket` → UDP registration → audio fan-out → keep-alive → disconnect. Keep
-   the WASI-only glue thin so this stays possible: anything host-testable (for example
-   `player_connect_reply`, the reply builder) belongs in `lib.rs` **outside** the `cfg`
-   gate.
+2. Integration coverage lives in two files under `crates/plasmo-voice-plugin/tests/`:
+   `lifecycle.rs` drives whole sessions through the public API (control message → minted
+   secret → decoded `ConnectionPacket` → UDP registration → audio fan-out → keep-alive →
+   disconnect), and `socket.rs` runs the same relay over three real `UdpSocket`s so the
+   receive loop, the address parsing and the send path are covered too — that is where a
+   `parse::<SocketAddr>` mistake would silently drop every outgoing frame while the unit
+   tests stayed green. Keep the WASI-only glue thin so this stays possible: anything
+   host-testable (for example `player_connect_reply`, the reply builder) belongs in
+   `lib.rs` **outside** the `cfg` gate.
 3. **Keep this file and `README.md` in sync with reality.** If a claim in either document
    is wrong, fixing it is part of your change.
