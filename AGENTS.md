@@ -182,6 +182,9 @@ fixing the disagreement is part of your change.
 * Never commit `target/` or editor/OS files. **`Cargo.lock` stays tracked**: it pins the
   exact Pumpkin API commit the git tag resolves to, and CI fails if it goes missing.
   Reconnaissance scratch is gitignored under `.recon/`.
+* The subject is not only for the log: `.github/workflows/release.yml` publishes it verbatim
+  as a changelog line when a `v*` tag is pushed (see §11, "Releasing"). Write it for someone
+  reading the release page, not for the diff.
 
 ## 9. Known traps
 
@@ -510,6 +513,35 @@ panel's firewall usually has to be told about UDP explicitly.
   `cargo build --target wasm32-wasip2` is sufficient and correct.
 * There are no wrapper scripts. `.github/workflows/ci.yml` is the only definition of the
   build, so nothing can drift out of sync with it.
+
+### Releasing
+
+Pushing a `v*` tag is the whole procedure:
+
+```powershell
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+[`.github/workflows/release.yml`](.github/workflows/release.yml) then builds the component,
+checks that the file really is a component (and not a core module), generates the release
+notes from the commits since the previous `v*` tag, and attaches both to the GitHub release.
+**Nobody writes release notes by hand.** GitHub's own `generate_release_notes` is deliberately
+*not* used: it lists merged pull requests, and this repository commits straight to `main`, so
+all it ever produced was a bare "Full Changelog" link. Instead the notes are the
+conventional-commit subjects of §8, grouped by type, with the pinned Pumpkin API version read
+out of the manifest. A subject that is not a conventional commit lands under "Other" rather
+than being dropped.
+
+Two things to know before cutting a release:
+
+* A tag-triggered run executes the workflow file **as of that tag**, so a release cut from a
+  commit older than a workflow change keeps the old behaviour. Tag a commit that carries the
+  workflow you want. (The first release, `v0.1.0`, was cut before the changelog generator
+  existed and needed one refresh.)
+* `gh workflow run release.yml --ref main -f tag=v0.1.0` regenerates the notes of a tag that
+  already exists. It replaces the release body and uploads **nothing**: that run checks out
+  the branch, not the tag, so its component is not the bytes that tag released.
 
 ### Attribution and licensing
 
