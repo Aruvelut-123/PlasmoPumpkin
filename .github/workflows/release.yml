@@ -1,7 +1,8 @@
 name: Release
 
 # On a version tag: build the plugin component, verify it is a real component,
-# and attach it to a GitHub release.
+# generate the changelog from the commit history, and attach both to a GitHub
+# release.
 on:
   push:
     tags: ["v*"]
@@ -18,7 +19,12 @@ jobs:
     name: build component
     runs-on: ubuntu-latest
     steps:
+      # Full history and tags: the changelog is generated from the commits
+      # between the previous version tag and this one, which a shallow clone
+      # cannot see at all.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -70,10 +76,108 @@ jobs:
           cp target/wasm32-wasip2/release/plasmo_voice_plugin.wasm dist/plasmo-voice.wasm
           ls -l dist
 
+      # The changelog is built from the commit history, not written by hand.
+      #
+      # GitHub's own `generate_release_notes` is not used: it lists *merged pull
+      # requests*, and this repository lands commits directly on `main`, so it
+      # would produce nothing but a compare link. The subjects are conventional
+      # commits (AGENTS.md §8), which is what makes the grouping below work — so
+      # the subject is the changelog line, and it is published verbatim.
+      - name: Generate changelog
+        run: |
+          set -euo pipefail
+
+          if [ "${GITHUB_REF_TYPE:-branch}" = "tag" ]; then
+            target="${GITHUB_REF_NAME}"
+            prev="$(git describe --tags --abbrev=0 --match 'v*' "${target}^" 2>/dev/null || true)"
+          else
+            # Manual dry run: everything since the newest version tag.
+            target="$(git rev-parse --short HEAD)"
+            prev="$(git describe --tags --abbrev=0 --match 'v*' HEAD 2>/dev/null || true)"
+          fi
+
+          if [ -n "$prev" ]; then
+            range="${prev}..${target}"
+            compare="**Full changelog:** https://github.com/${GITHUB_REPOSITORY}/compare/${prev}...${GITHUB_REF_NAME}"
+          else
+            # First release: no previous tag to compare against, so list the
+            # whole history reachable from the tag instead of nothing.
+            range="${target}"
+            compare=""
+          fi
+          echo "collecting commits from: ${range}"
+
+          # Strip the UTF-8 BOM a couple of the early commits carry, or their
+          # subjects would fall through to "Other".
+          subjects="$(git log --no-merges --pretty=format:'%s' "$range" | sed 's/^\xEF\xBB\xBF//')"
+
+          # Read the pinned API out of the manifest rather than repeating it
+          # here, so the notes cannot fall out of step with the build.
+          api="$(grep -E '^\s*pumpkin-plugin-api\s*=' crates/plasmo-voice-plugin/Cargo.toml \
+            | sed -nE 's/.*tag = "([^"]+)".*/\1/p' | head -n1)"
+          [ -n "$api" ] || api='(see crates/plasmo-voice-plugin/Cargo.toml)'
+
+          body=dist/CHANGELOG.md
+          {
+            printf 'Plasmo Voice\u2013compatible voice server, built as a Pumpkin WASM component.\n\n'
+            printf '**Install:** drop `plasmo-voice.wasm` into the server `plugins/` directory.\n'
+            printf 'The plugin needs `network.udp.bind`, a send permission\n'
+            printf '(`network.udp.connect` / `network.udp` / `network.outbound`) and\n'
+            printf '`fs.read.data` + `fs.write.data`; the server config must keep\n'
+            printf '`plugins.loopback_only = false`.\n\n'
+            printf 'Built against the pinned Pumpkin API `%s`.\n' "$api"
+            if [ -n "$prev" ]; then
+              printf '\nChanges since `%s`:\n' "$prev"
+            else
+              printf '\nFirst release.\n'
+            fi
+            printf '\n'
+          } > "$body"
+
+          group() {
+            local title="$1" pattern="$2" matches
+            matches="$(printf '%s\n' "$subjects" | grep -E "$pattern" || true)"
+            [ -n "$matches" ] || return 0
+            printf '### %s\n\n' "$title"
+            printf '%s\n' "$matches" | sed 's/^/- /'
+            printf '\n'
+          }
+
+          # Anything that is not a conventional commit, so a stray subject shows
+          # up in the notes instead of being silently dropped.
+          other() {
+            local matches
+            matches="$(printf '%s\n' "$subjects" \
+              | grep -vE '^(feat|fix|perf|refactor|docs|test|chore|ci|build|style)(\(|:|!)' || true)"
+            [ -n "$matches" ] || return 0
+            printf '### Other\n\n'
+            printf '%s\n' "$matches" | sed 's/^/- /'
+            printf '\n'
+          }
+
+          {
+            group 'Features'           '^feat(\(|:|!)'
+            group 'Fixes'              '^fix(\(|:|!)'
+            group 'Performance'        '^perf(\(|:|!)'
+            group 'Refactoring'        '^refactor(\(|:|!)'
+            group 'Documentation'      '^docs(\(|:|!)'
+            group 'Tests'              '^test(\(|:|!)'
+            group 'Maintenance and CI' '^(chore|ci|build|style)(\(|:|!)'
+            other
+          } >> "$body"
+
+          if [ -n "$compare" ]; then
+            printf '%s\n' "$compare" >> "$body"
+          fi
+
+          echo '--- generated changelog ---'
+          cat "$body"
+          echo '---------------------------'
+
       - uses: actions/upload-artifact@v4
         with:
           name: plasmo-voice-component
-          path: dist/plasmo-voice.wasm
+          path: dist/
           if-no-files-found: error
 
       - name: Publish release
@@ -81,14 +185,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/plasmo-voice.wasm
-          generate_release_notes: true
-          body: |
-            Plasmo Voice–compatible voice server, built as a Pumpkin WASM component.
-
-            **Install:** drop `plasmo-voice.wasm` into the server's `plugins/` directory.
-            The plugin needs `network.udp.bind`, a send permission
-            (`network.udp.connect` / `network.udp` / `network.outbound`), and
-            `fs.read.data` + `fs.write.data`; and the server config must keep
-            `plugins.loopback_only = false`.
-
-            Built against the pinned Pumpkin API `0.2.0+26.3-26.51`.
+          body_path: dist/CHANGELOG.md
