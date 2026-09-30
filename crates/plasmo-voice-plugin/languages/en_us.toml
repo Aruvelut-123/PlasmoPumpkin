@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: LGPL-3.0-only
 # The client-scope half of server/common/src/main/resources/languages/en_us.toml
 # (upstream reads this in VoiceServerLanguages.getClientLanguage).
 [client.pv.activation]

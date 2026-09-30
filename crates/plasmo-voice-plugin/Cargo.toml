@@ -3,7 +3,9 @@ name = "plasmo-voice-plugin"
 version = "0.1.0"
 edition = "2024"
 description = "Plasmo Voice-compatible voice server, running as a Pumpkin WASM component."
-license = "MIT"
+# LGPL-3.0, like upstream Plasmo Voice: this package bundles their
+# translations and reimplements their protocol. See AGENTS.md §11.
+license = "LGPL-3.0-only"
 
 [lib]
 # The plugin is loaded as a WebAssembly *component*; `cdylib` is what the

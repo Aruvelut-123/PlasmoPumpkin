@@ -78,6 +78,14 @@ Two crates, one workspace:
    ```
 
    Do not "fix" that by excluding the crate from `cargo test`; fix the dependency scope.
+7. **One licence — LGPL-3.0 — and keep the credit.** The whole repository is LGPL-3.0,
+   because it reimplements Plasmo Voice's protocol from their source and bundles their
+   locale data (`crates/plasmo-voice-plugin/languages/`, verbatim from
+   `plasmoapp/plasmo-voice-crowdin` branch `pv`, plus the jar's `en_us.toml`). `LICENSE` is
+   the verbatim FSF text, the same bytes upstream ships. The credit in `README.md`
+   ("Credits") is what that licence asks for: do not delete it, do not strip the
+   `SPDX-License-Identifier: LGPL-3.0-only` line from the locale files, and keep both
+   `Cargo.toml`s at `license = "LGPL-3.0-only"`.
 
 ## 3. Source-of-truth hierarchy
 
@@ -502,3 +510,16 @@ panel's firewall usually has to be told about UDP explicitly.
   `cargo build --target wasm32-wasip2` is sufficient and correct.
 * There are no wrapper scripts. `.github/workflows/ci.yml` is the only definition of the
   build, so nothing can drift out of sync with it.
+
+### Attribution and licensing
+
+The credit is in [`README.md`](README.md) ("Credits"). The licence is **LGPL-3.0-only for
+the whole repository** — not a per-part split — because the project reimplements Plasmo
+Voice's protocol from their published source and bundles their locale data, so the licence
+upstream chose is the honest one for all of it.
+
+`LICENSE` is a **verbatim** copy of the FSF LGPL-3.0 text, and of the file upstream ships
+(`plasmoapp/plasmo-voice`, blob `0a041280bd00a9d068f503b8ee7ce35214bd24a1`). The FSF forbids
+modifying the licence text, so provenance notes like this one live outside it; re-verify a
+re-fetch with `git hash-object LICENSE`, which must still print that blob. LGPL-3.0
+incorporates GPL-3.0 by reference (§3, §6); upstream ships only the LGPL text, and so do we.

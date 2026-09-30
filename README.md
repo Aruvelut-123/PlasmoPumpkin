@@ -115,6 +115,17 @@ canonical ones:
 There are no wrapper scripts; if this table and the workflow ever disagree, the workflow
 wins.
 
+## Credits
+
+This server speaks the protocol of **[Plasmo Voice](https://github.com/plasmoapp/plasmo-voice)**
+by [plasmoapp](https://github.com/plasmoapp), and could not exist without it. Packet ids,
+field layouts and wire semantics were reimplemented from `su.plo.voice.proto`, and the locale
+files under
+[`crates/plasmo-voice-plugin/languages/`](crates/plasmo-voice-plugin/languages) are upstream's
+own translations, taken from
+[plasmoapp/plasmo-voice-crowdin](https://github.com/plasmoapp/plasmo-voice-crowdin). Thank you.
+
 ## License
 
-MIT — see [LICENSE](LICENSE).
+**LGPL-3.0** — see [LICENSE](LICENSE). The licence Plasmo Voice itself uses, and therefore
+the one this project uses too.
