@@ -311,15 +311,24 @@ fixing the disagreement is part of your change.
    anything host-testable (for example `player_connect_reply`, the reply builder) belongs in
    `lib.rs` **outside** the `cfg` gate.
 3. Known gaps, in the order they matter (the user-facing summary is `README.md` →
-   "Limitations"): a client that offers **no usable public key** falls back to plaintext
-   audio (`ConfigPacket.encryption` is `null` — the server otherwise encrypts audio
-   end‑to‑end with an RSA‑wrapped AES key); only the proximity activation and source line
-   exist, with no TOML
+   "Limitations"): only the proximity activation
+   and source line exist, with no TOML
    config; permissions and `canSee`/vanish are not enforced; there is no server-side mute
    manager; positions come from `PlayerMoveEvent` rather than live world reads; and the
    decoration packets (`ConfigPlayerInfo`, `DistanceVisualize`, `AnimatedActionBar`, the
    addon/entity/static source variants) are not sent. Do not describe the plugin as "fully
    compatible" while those are open.
+   The missing-public-key fallback is a design choice, not a gap: a real client always
+   generates an RSA key pair and sends the public half in `PlayerInfoPacket`
+   (`ModServerConnection.generateKeyPair` / the `PlayerInfoPacket` send at
+   `ModServerConnection.java:354`), so the fallback is nearly unreachable. Upstream's
+   `sendConfigInfo` does `receiver.getPublicKey().orElseThrow(...)` and then `return`s from
+   the `catch`, so it never sends that player a `ConfigPacket` at all
+   (`VoiceTcpServerConnectionManager.java:109-125`). This server instead logs the failure
+   and sends a `ConfigPacket` with `encryption: None`, which the client accepts natively —
+   `ConfigPacket.encryption` is `@Nullable` and `ModServerConnection.handle` leaves
+   `Encryption` null when it is. Describe it in "How it works", never in "Limitations", and
+   do not present the fallback as parity with upstream: upstream refuses the client.
 4. **Keep this file and `README.md` in sync with reality.** If a claim in either document
    is wrong, fixing it is part of your change. Keep the split deliberate: `README.md` is a
    short quick start plus the user-facing limitations, and the reference material below

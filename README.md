@@ -59,7 +59,10 @@ the way out.
   key and wraps it per client with RSA/PKCS1v15, exactly like upstream
   `VoiceTcpServerConnectionManager`; the `ConfigPacket.encryption` field carries it, and
   the already-encrypted Opus frames are relayed verbatim. The server never touches the
-  audio cipher.
+  audio cipher. The protocol leaves `encryption` nullable and the client
+  (`ModServerConnection.handle`) natively runs plaintext when it is — so a client that
+  sends no usable public key gets a `ConfigPacket` without one and speaks in the clear,
+  where upstream instead aborts the config packet entirely for that client.
 * **Proximity voice** — players hear each other by distance, with the activation and
   source line from the in-game voice settings screen.
 * **Localized replies** — `LanguagePacket` is answered in the client's own locale.
@@ -100,8 +103,6 @@ line's name.
 
 The connect → config → relay path works end to end, but this is not full upstream parity:
 
-* A client that presents no usable public key falls back to **plaintext audio**
-  (`ConfigPacket.encryption` is `null`), matching upstream's `encryption == null` path.
 * Only the **proximity** activation and source line exist; there is no config file.
 * **Permissions and `canSee`/vanish are not enforced**, and there is no server-side mute
   manager.
