@@ -37,8 +37,11 @@ jobs:
 
       # wasm32-wasip2 already emits a component, so this is a plain build.
       # (`cargo-component` 0.21.1 cannot decode its own wit-bindgen 0.62 output.)
+      #
+      # `--locked` like CI: the lockfile pins the exact Pumpkin API commit the git
+      # tag resolves to, so a release must not silently re-resolve to another one.
       - name: Build component
-        run: cargo build --target wasm32-wasip2 -p plasmo-voice-plugin --release
+        run: cargo build --locked --target wasm32-wasip2 -p plasmo-voice-plugin --release
 
       - name: Verify component shape
         run: |
