@@ -19,6 +19,18 @@ const SERVER_SECRET: Uuid = Uuid::from_u128(0x1111_2222_3333_4444_5555_6666_7777
 const ALICE: Uuid = Uuid::from_u128(0x0000_000a_11ce);
 const BOB: Uuid = Uuid::from_u128(0x0000_0000_0b0b);
 
+/// A fixed server-wide AES key, so tests stay deterministic and the data plane
+/// does not touch the guest's random source.
+fn test_aes_key() -> plasmo_voice_plugin::crypto::AesKey {
+    plasmo_voice_plugin::crypto::AesKey::from_hex("00112233445566778899aabbccddeeff")
+        .expect("the test key is 32 lowercase hex chars")
+}
+
+/// The server under test, on a fixed secret.
+fn server() -> VoiceServer {
+    VoiceServer::new(SERVER_SECRET, test_aes_key())
+}
+
 /// A non-blocking client socket, so a test never blocks on a datagram that is not
 /// coming (which is how a broken relay should fail: with a timeout, not a hang).
 fn client() -> UdpSocket {
@@ -57,7 +69,7 @@ fn audio_from_one_client_reaches_the_other_over_real_sockets() {
     let codec = UdpCodec::new();
     let (socket, port) = bind(0).expect("voice socket");
     let mut runtime = VoiceRuntime::new();
-    runtime.start(socket, VoiceServer::new(SERVER_SECRET), "/tmp".to_string());
+    runtime.start(socket, server(), "/tmp".to_string());
     // Keep the sweep from retiring anything mid-test; the timeout behaviour is covered
     // by the `server.rs` unit tests with an injected clock.
     runtime.set_keep_alive_timeout(60_000);
@@ -214,7 +226,7 @@ fn a_stranger_never_gets_a_connection_or_a_reply() {
     let codec = UdpCodec::new();
     let (socket, port) = bind(0).expect("voice socket");
     let mut runtime = VoiceRuntime::new();
-    runtime.start(socket, VoiceServer::new(SERVER_SECRET), "/tmp".to_string());
+    runtime.start(socket, server(), "/tmp".to_string());
 
     let stranger = client();
     let server = format!("127.0.0.1:{port}");

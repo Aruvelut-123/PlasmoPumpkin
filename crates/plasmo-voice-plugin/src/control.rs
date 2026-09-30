@@ -216,11 +216,17 @@ impl ControlPlane {
             },
         );
 
-        // The RSA public key is deliberately not stored: this server sends an
-        // unencrypted config (see `ServerConfig::config_packet`).
+        // The client's RSA public key is kept on the registration so the burst that
+        // follows can wrap the server-wide AES key for exactly this player. A client
+        // that sent no key (or one the crypto layer refuses) falls back to a plaintext
+        // config, matching upstream's `encryption == null` path.
+        if !info.public_key.is_empty() {
+            server.set_player_public_key(player, &info.public_key);
+        }
         tracing::info!(
             %player,
             %secret,
+            has_public_key = !info.public_key.is_empty(),
             ip,
             port,
             client_version = %info.version,
@@ -369,8 +375,25 @@ impl ControlPlane {
 
         let mut out = Vec::with_capacity(3);
 
-        // 1. `sendConfigInfo` — the whole server config.
-        let config = TcpPacket::Config(self.config.config_packet());
+        // 1. `sendConfigInfo` — the whole server config, with the AES key wrapped
+        //    for this player. A client that sent a public key this server cannot
+        //    parse gets `encryption: None` — upstream aborts the config packet
+        //    entirely on that failure, this server downgrades loudly instead, so
+        //    the client never receives a key it cannot use.
+        let encryption = server.player_public_key(&player).and_then(|der| {
+            match server.aes_key().encryption_info(der) {
+                Ok(info) => Some(info),
+                Err(error) => {
+                    tracing::warn!(
+                        %player,
+                        %error,
+                        "the client's RSA public key is unusable; its audio stays plaintext"
+                    );
+                    None
+                }
+            }
+        });
+        let config = TcpPacket::Config(self.config.config_packet(encryption));
         out.push(Outbound::to_player(player, self.encode(&config)));
 
         // 2. `sendPlayerList` — everyone with a live connection, including this player.
@@ -420,6 +443,18 @@ mod tests {
     const SERVER_ID: Uuid = Uuid::from_u128(0x1111_2222_3333_4444_5555_6666_7777_8888);
     const ALICE: Uuid = Uuid::from_u128(0x0000_000a_11ce);
     const BOB: Uuid = Uuid::from_u128(0x0000_0000_0b0b);
+
+    /// A fixed server-wide AES key, so tests stay deterministic and the data
+    /// plane does not touch the guest's random source.
+    fn test_aes_key() -> crate::crypto::AesKey {
+        crate::crypto::AesKey::from_hex("00112233445566778899aabbccddeeff")
+            .expect("the test key is 32 lowercase hex chars")
+    }
+
+    /// The server under test, on a fixed secret.
+    fn server() -> VoiceServer {
+        VoiceServer::new(SERVER_ID, test_aes_key())
+    }
 
     fn codec() -> TcpCodec {
         TcpCodec::new()
@@ -492,7 +527,7 @@ mod tests {
     #[test]
     fn a_client_that_identifies_itself_is_given_its_udp_endpoint() {
         let plane = ControlPlane::new(SERVER_ID);
-        let mut server = VoiceServer::new(SERVER_ID);
+        let mut server = server();
 
         let messages = plane.handle(
             &mut server,
@@ -521,7 +556,7 @@ mod tests {
     #[test]
     fn an_incompatible_client_is_refused_silently() {
         let plane = ControlPlane::new(SERVER_ID);
-        let mut server = VoiceServer::new(SERVER_ID);
+        let mut server = server();
 
         // A major-version mismatch, an ancient client, and a version that is not one.
         for version in ["3.0.0", "1.9.9", "garbage"] {
@@ -545,7 +580,7 @@ mod tests {
     #[test]
     fn undecodable_and_misdirected_payloads_are_ignored() {
         let plane = ControlPlane::new(SERVER_ID);
-        let mut server = VoiceServer::new(SERVER_ID);
+        let mut server = server();
 
         // A truncated packet, an unknown id, and a *clientbound* id sent by the client.
         let clientbound = codec()
@@ -563,7 +598,7 @@ mod tests {
     #[test]
     fn a_state_change_is_broadcast_but_a_repeat_is_not() {
         let plane = ControlPlane::new(SERVER_ID);
-        let mut server = VoiceServer::new(SERVER_ID);
+        let mut server = server();
         connect(&mut server, ALICE, "1.1.1.1:10");
 
         let payload = codec()
@@ -593,7 +628,7 @@ mod tests {
     #[test]
     fn activation_distances_are_recorded_and_never_answered() {
         let plane = ControlPlane::new(SERVER_ID);
-        let mut server = VoiceServer::new(SERVER_ID);
+        let mut server = server();
         connect(&mut server, ALICE, "1.1.1.1:10");
 
         let proximity = plane.config().activations()[0].id;
@@ -624,7 +659,7 @@ mod tests {
     #[test]
     fn an_audio_end_reaches_the_listeners_and_the_speaker() {
         let plane = ControlPlane::new(SERVER_ID);
-        let mut server = VoiceServer::new(SERVER_ID);
+        let mut server = server();
         connect(&mut server, ALICE, "1.1.1.1:10");
         connect(&mut server, BOB, "2.2.2.2:20");
         server.set_position(&ALICE, Some("world".to_string()), (0.0, 64.0, 0.0));
@@ -678,7 +713,7 @@ mod tests {
     #[test]
     fn a_source_info_request_is_answered_for_a_known_source_only() {
         let plane = ControlPlane::new(SERVER_ID);
-        let mut server = VoiceServer::new(SERVER_ID);
+        let mut server = server();
         connect(&mut server, ALICE, "1.1.1.1:10");
         connect(&mut server, BOB, "2.2.2.2:20");
 
@@ -719,7 +754,7 @@ mod tests {
     #[test]
     fn a_language_request_is_answered_with_the_requested_locale() {
         let plane = ControlPlane::new(SERVER_ID);
-        let mut server = VoiceServer::new(SERVER_ID);
+        let mut server = server();
 
         let payload = codec()
             .encode(&TcpPacket::LanguageRequest(LanguageRequestPacket {
@@ -755,7 +790,7 @@ mod tests {
     #[test]
     fn an_unknown_locale_is_answered_in_the_fallback_locale() {
         let plane = ControlPlane::new(SERVER_ID);
-        let mut server = VoiceServer::new(SERVER_ID);
+        let mut server = server();
 
         let payload = codec()
             .encode(&TcpPacket::LanguageRequest(LanguageRequestPacket {
@@ -782,7 +817,7 @@ mod tests {
     #[test]
     fn the_burst_needs_a_registration_and_a_connection() {
         let plane = ControlPlane::new(SERVER_ID);
-        let mut server = VoiceServer::new(SERVER_ID);
+        let mut server = server();
         assert!(
             plane.registration_burst(&server, ALICE).is_empty(),
             "a stranger gets nothing"
@@ -808,7 +843,7 @@ mod tests {
     #[test]
     fn disconnecting_forgets_the_player_and_broadcasts_it() {
         let plane = ControlPlane::new(SERVER_ID);
-        let mut server = VoiceServer::new(SERVER_ID);
+        let mut server = server();
         connect(&mut server, ALICE, "1.1.1.1:10");
 
         let messages = plane.disconnect(&mut server, ALICE);
@@ -865,7 +900,7 @@ mod tests {
         // Every one of them reaches a real arm: none of these six calls may be answered
         // with nothing, except the two that are legitimately silent.
         let plane = ControlPlane::new(SERVER_ID);
-        let mut server = VoiceServer::new(SERVER_ID);
+        let mut server = server();
         connect(&mut server, ALICE, "1.1.1.1:10");
 
         assert_eq!(
@@ -929,7 +964,7 @@ mod tests {
     #[test]
     fn a_config_packet_round_trips_in_the_clientbound_direction_only() {
         let plane = ControlPlane::new(SERVER_ID);
-        let config = plane.config().config_packet();
+        let config = plane.config().config_packet(None);
         let bytes = codec()
             .encode(&TcpPacket::Config(config.clone()))
             .expect("encode");

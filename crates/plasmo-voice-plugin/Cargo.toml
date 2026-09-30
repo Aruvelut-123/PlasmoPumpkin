@@ -1,6 +1,6 @@
 [package]
 name = "plasmo-voice-plugin"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Plasmo Voice-compatible voice server, running as a Pumpkin WASM component."
 # LGPL-3.0, like upstream Plasmo Voice: this package bundles their
@@ -17,6 +17,18 @@ crate-type = ["cdylib", "rlib"]
 plasmo-voice-core = { path = "../plasmo-voice-core" }
 uuid = "1"
 tracing = "0.1"
+
+# RSA public-key encryption, for the `ConfigPacket.encryption` key exchange — the one
+# cryptographic operation this *server* performs (see `src/crypto.rs`). Pure Rust, so it
+# builds for `wasm32-wasip2`; the component's only new import is `wasi:random/random`,
+# which the Pumpkin runtime already registers (`wasmtime_wasi::p2::add_to_linker_async`).
+#
+# `sha2` is not needed: upstream uses `Cipher.getInstance("RSA")`, which is
+# RSA/ECB/PKCS1Padding — no digest. `getrandom` is what reaches the host's entropy, and it
+# is load-bearing: PKCS#1 v1.5 padding must be unpredictable, and a guessable AES key would
+# be worse than the plaintext this replaces.
+rsa = "0.9"
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 [target.'cfg(target_os = "wasi")'.dependencies]
 # Pumpkin plugin ABI. `pumpkin-plugin-api` runs `wit_bindgen::generate!` for us —

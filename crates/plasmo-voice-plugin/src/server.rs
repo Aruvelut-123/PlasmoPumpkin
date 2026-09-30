@@ -71,6 +71,16 @@ pub struct RegisteredPlayer {
     pub name: Option<String>,
     /// The audio source id this player's voice is published under.
     pub source_id: Uuid,
+    /// The client's RSA public key (`PlayerInfoPacket.public_key`), X.509
+    /// `SubjectPublicKeyInfo` DER — the encoding a Java client sends, because it
+    /// reads the bytes out of `X509EncodedKeySpec(publicKey.getEncoded())`.
+    ///
+    /// Stored so the *registration burst* can wrap the server-wide AES key for
+    /// exactly this player (`ConfigPacket.encryption`, upstream
+    /// `VoiceTcpServerConnectionManager.sendConfigInfo`). A client that sent no
+    /// key — or sent one this server cannot parse — gets an unencrypted config
+    /// and plaintext audio, matching upstream's `encryption == null` path.
+    pub public_key: Option<Vec<u8>>,
     /// Server-side mute (`VoiceMuteManager`); false until a mute manager exists.
     pub muted: bool,
     /// The client reported voice chat disabled (clientbound `PlayerStatePacket`).
@@ -196,6 +206,11 @@ pub struct VoiceServer {
     secret_counter: u64,
     /// The server-wide secret advertised in the IPC `handshake` reply.
     server_secret: Uuid,
+    /// The server-wide AES key, wrapped per client into `ConfigPacket.encryption`.
+    ///
+    /// Persisted across reloads (see `state.aes_key`) so clients that are already
+    /// connected keep a working cipher.
+    aes_key: crate::crypto::AesKey,
     /// Datagrams dropped before decoding (wrong magic / bad header / unknown
     /// secret) or rejected after decoding (unknown id / wrong direction).
     dropped: u64,
@@ -210,12 +225,14 @@ pub struct VoiceServer {
 }
 
 impl VoiceServer {
-    /// Creates a server whose advertised secret is `server_secret`.
+    /// Creates a server whose advertised secret is `server_secret` and whose
+    /// clients share the AES key `aes_key`.
     ///
     /// The server id in the clientbound `ConfigPacket` is the same secret: it identifies
-    /// this voice server to the client's own config store.
+    /// this voice server to the client's own config store. The AES key is the one
+    /// persisted value the data plane needs across reloads.
     #[must_use]
-    pub fn new(server_secret: Uuid) -> Self {
+    pub fn new(server_secret: Uuid, aes_key: crate::crypto::AesKey) -> Self {
         Self {
             codec: UdpCodec::new(),
             control: ControlPlane::new(server_secret),
@@ -225,6 +242,7 @@ impl VoiceServer {
             player_by_secret: HashMap::new(),
             secret_counter: 0,
             server_secret,
+            aes_key,
             dropped: 0,
             unknown_secret_drops: 0,
             malformed_drops: 0,
@@ -300,6 +318,34 @@ impl VoiceServer {
     #[must_use]
     pub const fn server_secret(&self) -> Uuid {
         self.server_secret
+    }
+
+    /// The server-wide AES key shared by every client.
+    ///
+    /// Only the control plane reads it, when it wraps the key per player for
+    /// `ConfigPacket.encryption`.
+    #[must_use]
+    pub const fn aes_key(&self) -> &crate::crypto::AesKey {
+        &self.aes_key
+    }
+
+    /// Stores the client's RSA public key, for the config packet that follows.
+    ///
+    /// Re-registering a player (a client rebuilds its UDP socket without a new
+    /// control-plane round trip) keeps the earlier key — a client does not resend
+    /// `PlayerInfoPacket` on a reconnect.
+    pub fn set_player_public_key(&mut self, player_id: Uuid, public_key: &[u8]) {
+        if let Some(registered) = self.registered.get_mut(&player_id) {
+            registered.public_key = Some(public_key.to_vec());
+        }
+    }
+
+    /// The client's RSA public key, if it sent one.
+    #[must_use]
+    pub fn player_public_key(&self, player_id: &Uuid) -> Option<&[u8]> {
+        self.registered
+            .get(player_id)
+            .and_then(|registered| registered.public_key.as_deref())
     }
 
     /// Number of datagrams dropped so far.
@@ -450,6 +496,7 @@ impl VoiceServer {
                 source_id: crate::state::VoiceServerState::generate_secret_uuid(
                     seed ^ 0x5350_4157_4e5f_5349,
                 ),
+                public_key: None,
                 muted: false,
                 voice_disabled: false,
                 microphone_muted: false,
@@ -1106,6 +1153,18 @@ mod tests {
     const SERVER_SECRET: Uuid = Uuid::from_u128(0x1111_2222_3333_4444_5555_6666_7777_8888);
     const CLIENT_SECRET: Uuid = Uuid::from_u128(0xaaaa_bbbb_cccc_dddd_eeee_ffff_0000_1111);
 
+    /// A fixed server-wide AES key, so tests stay deterministic and the data
+    /// plane does not touch the guest's random source.
+    fn test_aes_key() -> crate::crypto::AesKey {
+        crate::crypto::AesKey::from_hex("00112233445566778899aabbccddeeff")
+            .expect("the test key is 32 lowercase hex chars")
+    }
+
+    /// The server under test, on a fixed secret.
+    fn server() -> VoiceServer {
+        VoiceServer::new(SERVER_SECRET, test_aes_key())
+    }
+
     fn codec() -> UdpCodec {
         UdpCodec::new()
     }
@@ -1126,7 +1185,7 @@ mod tests {
 
     #[test]
     fn a_registered_players_ping_creates_the_connection_and_is_not_echoed() {
-        let mut server = VoiceServer::new(SERVER_SECRET);
+        let mut server = server();
         let secret = register(&mut server, 0xa11ce);
 
         let wire = codec().encode(&empty_ping(), secret, 42).expect("encode");
@@ -1156,7 +1215,7 @@ mod tests {
 
     #[test]
     fn the_first_datagram_of_a_session_only_registers_the_connection() {
-        let mut server = VoiceServer::new(SERVER_SECRET);
+        let mut server = server();
         let secret = register(&mut server, 0xa11ce);
 
         // Upstream's `channelRead0` creates the connection and sends the burst; the
@@ -1192,7 +1251,7 @@ mod tests {
     fn the_registration_burst_is_config_then_player_list_then_update() {
         use plasmo_voice_core::TcpPacket;
 
-        let mut server = VoiceServer::new(SERVER_SECRET);
+        let mut server = server();
         let secret = register(&mut server, 0xa11ce);
         let wire = codec().encode(&empty_ping(), secret, 1).expect("encode");
         let handled = server.handle_datagram("1.1.1.1:10", &wire);
@@ -1245,7 +1304,7 @@ mod tests {
 
     #[test]
     fn a_client_that_roams_is_followed_to_its_new_address() {
-        let mut server = VoiceServer::new(SERVER_SECRET);
+        let mut server = server();
         let secret = register(&mut server, 0xb0b);
         let wire = codec().encode(&empty_ping(), secret, 1).expect("encode");
 
@@ -1266,7 +1325,7 @@ mod tests {
 
     #[test]
     fn datagrams_with_an_unknown_secret_are_dropped() {
-        let mut server = VoiceServer::new(SERVER_SECRET);
+        let mut server = server();
         // Perfectly well-formed traffic — but nobody registered this secret, so
         // upstream's packet handler returns before creating a connection.
         let wire = codec()
@@ -1285,7 +1344,7 @@ mod tests {
 
     #[test]
     fn audio_from_an_unregistered_sender_is_never_relayed() {
-        let mut server = VoiceServer::new(SERVER_SECRET);
+        let mut server = server();
         let bob_secret = register(&mut server, 0xb0b);
         server.add_connection(
             bob_secret,
@@ -1316,7 +1375,7 @@ mod tests {
 
     #[test]
     fn unregistering_a_player_drops_its_connection_and_its_secret() {
-        let mut server = VoiceServer::new(SERVER_SECRET);
+        let mut server = server();
         let player = Uuid::from_u128(0xa11ce);
         let secret = server.register_player(player, Some("alice".into()));
         server.add_connection(secret, "1.1.1.1:10".to_string(), Some(player));
@@ -1336,7 +1395,7 @@ mod tests {
 
     #[test]
     fn registering_a_player_twice_reuses_the_secret() {
-        let mut server = VoiceServer::new(SERVER_SECRET);
+        let mut server = server();
         let player = Uuid::from_u128(0xa11ce);
 
         let first = server.register_player(player, None);
@@ -1352,7 +1411,7 @@ mod tests {
 
     #[test]
     fn distinct_players_get_distinct_secrets() {
-        let mut server = VoiceServer::new(SERVER_SECRET);
+        let mut server = server();
         let alice = register(&mut server, 0xa11ce);
         let bob = register(&mut server, 0xb0b);
 
@@ -1363,7 +1422,7 @@ mod tests {
 
     #[test]
     fn keep_alive_pings_idle_connections_and_retires_silent_ones() {
-        let mut server = VoiceServer::new(SERVER_SECRET);
+        let mut server = server();
         let secret = register(&mut server, 0xc0ffee);
         server.add_connection(secret, "1.1.1.1:10".to_string(), None);
         let now = now_ms();
@@ -1417,7 +1476,7 @@ mod tests {
 
     #[test]
     fn keep_alive_does_not_expire_a_client_that_keeps_talking() {
-        let mut server = VoiceServer::new(SERVER_SECRET);
+        let mut server = server();
         let secret = register(&mut server, 0xc0ffee);
         server.add_connection(secret, "1.1.1.1:10".to_string(), None);
 
@@ -1432,7 +1491,7 @@ mod tests {
 
     #[test]
     fn non_pv_traffic_is_dropped_without_a_reply() {
-        let mut server = VoiceServer::new(SERVER_SECRET);
+        let mut server = server();
         let handled = server.handle_datagram("10.0.0.1:5000", b"hello there");
         assert!(handled.outgoing.is_empty());
         assert!(!handled.was_ping);
@@ -1441,7 +1500,7 @@ mod tests {
 
     #[test]
     fn a_timed_out_connection_reports_the_player_for_a_new_handshake() {
-        let mut server = VoiceServer::new(SERVER_SECRET);
+        let mut server = server();
         let player = Uuid::from_u128(0xc0ffee);
         let secret = server.register_player(player, Some("carol".into()));
         server.add_connection(secret, "1.1.1.1:10".to_string(), Some(player));
@@ -1468,7 +1527,7 @@ mod tests {
 
     #[test]
     fn truncated_ping_is_dropped() {
-        let mut server = VoiceServer::new(SERVER_SECRET);
+        let mut server = server();
         // Magic number then nothing else: wrong magic? no — correct magic but
         // the header is short, so decoding fails and nothing is sent.
         let mut wire = Vec::new();
@@ -1482,7 +1541,7 @@ mod tests {
 
     #[test]
     fn connections_are_unique_per_secret_and_address() {
-        let mut server = VoiceServer::new(SERVER_SECRET);
+        let mut server = server();
         let alice = Uuid::from_u128(0xa11ce);
         server.add_connection(CLIENT_SECRET, "1.2.3.4:10".to_string(), Some(alice));
         assert_eq!(server.connection_count(), 1);
@@ -1543,7 +1602,7 @@ mod tests {
 
     #[test]
     fn player_audio_becomes_source_audio_for_listeners_in_range() {
-        let mut server = VoiceServer::new(SERVER_SECRET);
+        let mut server = server();
         let alice = Uuid::from_u128(0xa11ce);
         let alice_secret = connect(&mut server, 0xa11ce, "1.1.1.1:10", "world", (0.0, 0.0, 0.0));
         let bob_secret = connect(&mut server, 0xb0b, "2.2.2.2:20", "world", (10.0, 0.0, 0.0));
@@ -1622,7 +1681,7 @@ mod tests {
 
     #[test]
     fn audio_is_only_relayed_inside_the_activation_radius() {
-        let mut server = VoiceServer::new(SERVER_SECRET);
+        let mut server = server();
         let alice_secret = connect(&mut server, 0xa11ce, "1.1.1.1:10", "world", (0.0, 0.0, 0.0));
         // 16 blocks is the default distance, so upstream's radius is
         // `min(16 + 16, 16 * 2) == 32`.
@@ -1648,7 +1707,7 @@ mod tests {
 
     #[test]
     fn audio_never_crosses_a_world_boundary() {
-        let mut server = VoiceServer::new(SERVER_SECRET);
+        let mut server = server();
         let alice_secret = connect(
             &mut server,
             0xa11ce,
@@ -1673,7 +1732,7 @@ mod tests {
 
     #[test]
     fn a_player_without_a_known_position_is_never_a_listener() {
-        let mut server = VoiceServer::new(SERVER_SECRET);
+        let mut server = server();
         let alice_secret = connect(&mut server, 0xa11ce, "1.1.1.1:10", "world", (0.0, 0.0, 0.0));
         // Bob is connected but the host has not told us where he is.
         register(&mut server, 0xb0b);
@@ -1701,7 +1760,7 @@ mod tests {
 
     #[test]
     fn an_activation_this_server_does_not_offer_is_never_relayed() {
-        let mut server = VoiceServer::new(SERVER_SECRET);
+        let mut server = server();
         let alice_secret = connect(&mut server, 0xa11ce, "1.1.1.1:10", "world", (0.0, 0.0, 0.0));
         connect(&mut server, 0xb0b, "2.2.2.2:20", "world", (1.0, 0.0, 0.0));
 
@@ -1720,7 +1779,7 @@ mod tests {
     #[test]
     fn a_muted_or_disabled_speaker_is_never_relayed() {
         for (voice_disabled, microphone_muted) in [(true, false), (false, true)] {
-            let mut server = VoiceServer::new(SERVER_SECRET);
+            let mut server = server();
             let alice_secret =
                 connect(&mut server, 0xa11ce, "1.1.1.1:10", "world", (0.0, 0.0, 0.0));
             connect(&mut server, 0xb0b, "2.2.2.2:20", "world", (1.0, 0.0, 0.0));
@@ -1743,7 +1802,7 @@ mod tests {
 
     #[test]
     fn a_listener_with_voice_chat_off_hears_nothing() {
-        let mut server = VoiceServer::new(SERVER_SECRET);
+        let mut server = server();
         let alice_secret = connect(&mut server, 0xa11ce, "1.1.1.1:10", "world", (0.0, 0.0, 0.0));
         connect(&mut server, 0xb0b, "2.2.2.2:20", "world", (1.0, 0.0, 0.0));
         assert!(server.set_player_state(&Uuid::from_u128(0xb0b), true, false));
@@ -1763,7 +1822,7 @@ mod tests {
 
     #[test]
     fn the_relayed_distance_is_clamped_to_one_the_activation_allows() {
-        let mut server = VoiceServer::new(SERVER_SECRET);
+        let mut server = server();
         let alice_secret = connect(&mut server, 0xa11ce, "1.1.1.1:10", "world", (0.0, 0.0, 0.0));
         connect(&mut server, 0xb0b, "2.2.2.2:20", "world", (1.0, 0.0, 0.0));
         let activation = server.config().activations()[0].id;
@@ -1820,7 +1879,7 @@ mod tests {
 
     #[test]
     fn a_listener_can_look_up_the_source_info_of_whoever_it_hears() {
-        let mut server = VoiceServer::new(SERVER_SECRET);
+        let mut server = server();
         connect(&mut server, 0xa11ce, "1.1.1.1:10", "world", (0.0, 0.0, 0.0));
         connect(&mut server, 0xb0b, "2.2.2.2:20", "world", (1.0, 0.0, 0.0));
         let alice = Uuid::from_u128(0xa11ce);
@@ -1855,7 +1914,7 @@ mod tests {
     fn source_direction_ids_are_not_accepted_inbound() {
         // SourceAudio is CLIENT-direction, i.e. the server *sends* it; a client
         // sending one must be ignored.
-        let mut server = VoiceServer::new(SERVER_SECRET);
+        let mut server = server();
         // Registered, so the datagram passes the secret check and the *direction*
         // check is what rejects it.
         let secret = register(&mut server, 0xa11ce);

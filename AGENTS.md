@@ -86,6 +86,14 @@ Two crates, one workspace:
    ("Credits") is what that licence asks for: do not delete it, do not strip the
    `SPDX-License-Identifier: LGPL-3.0-only` line from the locale files, and keep both
    `Cargo.toml`s at `license = "LGPL-3.0-only"`.
+8. **Bump only the crates a change actually touches.** The two crates are versioned
+   independently, and a crate that this change does not modify keeps its version — no
+   "keep the numbers in step" bump, no bumping `plasmo-voice-core` because the plugin moved.
+   A change that alters the core's public API or its wire behaviour bumps the core; a change
+   that only adds server behaviour on top of an unchanged core bumps the plugin and leaves
+   the core where it was. Say in the commit message which crate moved and why. Release tags
+   name the project as a whole (`v0.2.0`), which is a separate thing from a crate version:
+   never tag a version just because it is unused.
 
 ## 3. Source-of-truth hierarchy
 
@@ -303,8 +311,10 @@ fixing the disagreement is part of your change.
    anything host-testable (for example `player_connect_reply`, the reply builder) belongs in
    `lib.rs` **outside** the `cfg` gate.
 3. Known gaps, in the order they matter (the user-facing summary is `README.md` →
-   "Limitations"): `ConfigPacket.encryption` is `null`, so **audio is plaintext** (no RSA
-   in the guest yet); only the proximity activation and source line exist, with no TOML
+   "Limitations"): `ConfigPacket.encryption` is `null` **only when the client sends no
+   usable public key**, so audio is plaintext in that fallback (the server otherwise
+   encrypts audio end‑to‑end with an RSA‑wrapped AES key); only the proximity activation
+   and source line exist, with no TOML
    config; permissions and `canSee`/vanish are not enforced; there is no server-side mute
    manager; positions come from `PlayerMoveEvent` rather than live world reads; and the
    decoration packets (`ConfigPlayerInfo`, `DistanceVisualize`, `AnimatedActionBar`, the

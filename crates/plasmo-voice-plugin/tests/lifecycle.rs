@@ -20,6 +20,18 @@ const BOB: Uuid = Uuid::from_u128(0x0000_0000_0b0b);
 const SERVER_IP: &str = "203.0.113.7";
 const SERVER_PORT: u16 = 8830;
 
+/// A fixed server-wide AES key, so tests stay deterministic and the data plane
+/// does not touch the guest's random source.
+fn test_aes_key() -> plasmo_voice_plugin::crypto::AesKey {
+    plasmo_voice_plugin::crypto::AesKey::from_hex("00112233445566778899aabbccddeeff")
+        .expect("the test key is 32 lowercase hex chars")
+}
+
+/// The server under test, on a fixed secret.
+fn server() -> VoiceServer {
+    VoiceServer::new(SERVER_SECRET, test_aes_key())
+}
+
 /// Sends one `player-connect` control message and returns the secret the client
 /// would learn from the encoded `ConnectionPacket`.
 ///
@@ -84,7 +96,7 @@ fn registration_ping(codec: &UdpCodec, secret: Uuid) -> Vec<u8> {
 #[test]
 fn a_whole_session_connects_relays_and_disconnects() {
     let codec = UdpCodec::new();
-    let mut server = VoiceServer::new(SERVER_SECRET);
+    let mut server = server();
 
     // 1. Control plane: two players join and each learns its own secret.
     let alice = connect(&mut server, ALICE, "Alice");
@@ -258,7 +270,7 @@ fn a_whole_session_connects_relays_and_disconnects() {
 #[test]
 fn a_client_that_changes_address_keeps_its_connection() {
     let codec = UdpCodec::new();
-    let mut server = VoiceServer::new(SERVER_SECRET);
+    let mut server = server();
     let alice = connect(&mut server, ALICE, "Alice");
     let ping = registration_ping(&codec, alice);
 
@@ -281,7 +293,7 @@ fn a_client_that_changes_address_keeps_its_connection() {
 #[test]
 fn a_disconnected_player_is_forgotten_but_can_reconnect() {
     let codec = UdpCodec::new();
-    let mut server = VoiceServer::new(SERVER_SECRET);
+    let mut server = server();
     let first = connect(&mut server, ALICE, "Alice");
     server.handle_datagram("198.51.100.10:40000", &registration_ping(&codec, first));
 

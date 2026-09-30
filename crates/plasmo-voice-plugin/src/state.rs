@@ -24,6 +24,16 @@ pub struct VoiceServerState {
     /// server keeps the authoritative one so a reload does not silently
     /// invalidate clients that are already connected.
     pub secret: String,
+    /// The server-wide AES key, lowercase hex (`32` chars = `16` bytes).
+    ///
+    /// Upstream persists the same 16 random bytes in `config.json`
+    /// (`BaseVoiceServer.aesEncryptionKey`) and regenerates them whenever the
+    /// server id changes. Here the key is generated on first load and then kept
+    /// verbatim: **changing it is a security decision, shown as a warn**, never a
+    /// silent reload effect. Empty string means "not generated yet"; the glue
+    /// fills it in and saves the state. The key is hex so the existing flat,
+    /// dependency-free JSON parser can store it as a plain string.
+    pub aes_key: String,
     /// Protocol version this server advertises (`2.1.7` upstream).
     pub protocol_version: String,
     /// Whether the UDP listener is enabled at all.
@@ -35,6 +45,7 @@ impl Default for VoiceServerState {
         Self {
             port: 0,
             secret: String::new(),
+            aes_key: String::new(),
             protocol_version: PROTOCOL_VERSION.to_string(),
             enabled: true,
         }
@@ -57,6 +68,7 @@ impl VoiceServerState {
                         .map_err(|e| format!("invalid port {value:?}: {e}"))?;
                 }
                 "secret" => state.secret = unquote(&value),
+                "aes_key" => state.aes_key = unquote(&value),
                 "protocol_version" => state.protocol_version = unquote(&value),
                 "enabled" => {
                     state.enabled = value
@@ -76,9 +88,10 @@ impl VoiceServerState {
     #[must_use]
     pub fn to_json(&self) -> String {
         format!(
-            "{{\n  \"port\": {},\n  \"secret\": \"{}\",\n  \"protocol_version\": \"{}\",\n  \"enabled\": {}\n}}\n",
+            "{{\n  \"port\": {},\n  \"secret\": \"{}\",\n  \"aes_key\": \"{}\",\n  \"protocol_version\": \"{}\",\n  \"enabled\": {}\n}}\n",
             self.port,
             escape(&self.secret),
+            escape(&self.aes_key),
             escape(&self.protocol_version),
             self.enabled,
         )
@@ -156,12 +169,13 @@ impl VoiceServerState {
 
     /// Derives a secret UUID from the platform's strongest available entropy.
     ///
-    /// `wasm32-wasip2` has no `getrandom` backend wired up, so this mixes the wall
-    /// clock with the bound port through xorshift64*. The result is not
-    /// cryptographically strong, but the voice secret only needs to be
-    /// unguessable-per-server and stable across restarts, and the worst case for a
-    /// collision is two servers sharing an obfuscation key. The persisted state is
-    /// what actually makes it stable.
+    /// `wasm32-wasip2` *does* have a `getrandom` backend (`wasi:random/random`,
+    /// registered by the Pumpkin runtime — see `crypto.rs`), but this method keeps
+    /// its original clock + port mix through xorshift64*: the voice secret only
+    /// needs to be unguessable-per-server and stable across restarts, and the
+    /// persisted state is what actually makes it stable. [`crate::crypto::AesKey`]
+    /// is the one value that must be cryptographically strong, and it uses the
+    /// real random source.
     #[must_use]
     pub fn generate_secret(port: u16) -> String {
         Self::generate_secret_uuid(u64::from(port).rotate_left(17)).to_string()
@@ -327,6 +341,7 @@ mod tests {
         let state = VoiceServerState {
             port: 25565,
             secret: "8f14e45f-ceea-467a-9a2e-1b0e5c3a7d11".to_string(),
+            aes_key: "0123456789abcdef0123456789abcdef".to_string(),
             protocol_version: PROTOCOL_VERSION.to_string(),
             enabled: false,
         };

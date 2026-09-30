@@ -16,11 +16,14 @@
 //!   a real client. An empty visibility list is fine.
 //! * `activations` — legally empty, but with no activation the client cannot key up, so
 //!   the proximity activation is required for a *usable* server.
-//! * `encryption` — genuinely optional: `null` means "plaintext audio", which the client
-//!   accepts. See [`ServerConfig::config_packet`] for the deviation that comes with it.
+//! * `encryption` — per-player, and genuinely optional: `null` means "plaintext audio",
+//!   which the client accepts. Defaults to a real `EncryptionInfo` here (see
+//!   [`ServerConfig::config_packet`]); `None` only survives when the client sent no
+//!   usable public key.
 
 use plasmo_voice_core::data::{
-    CaptureInfo, CodecInfo, PlayerIconConfig, Pos3d, VoiceActivation, VoiceSourceLine,
+    CaptureInfo, CodecInfo, EncryptionInfo, PlayerIconConfig, Pos3d, VoiceActivation,
+    VoiceSourceLine,
 };
 use plasmo_voice_core::wire::ConfigPacket;
 use uuid::Uuid;
@@ -170,23 +173,20 @@ impl ServerConfig {
     /// `VoiceTcpServerConnectionManager.sendConfigInfo`: the packet a player is sent once
     /// their UDP connection exists.
     ///
-    /// ## Deviation: no encryption
+    /// ## Encryption
     ///
     /// Upstream RSA-encrypts a 16-byte AES key with the public key the client sent in its
     /// `PlayerInfoPacket` (`VoiceTcpServerConnectionManager.java:110`) and lets a failure
-    /// abort the config packet entirely. This plugin sends `encryption: None` instead,
-    /// which the protocol and the client both support: `ModServerConnection` only installs
-    /// a cipher when `getEncryption() != null`. The consequence is honest and worth
-    /// stating plainly — **UDP audio is not encrypted**, and the client sends plaintext
-    /// Opus frames. Doing it properly means an RSA implementation in the guest and a
-    /// persisted AES key; until then, plaintext is the documented behaviour rather than a
-    /// silently different key.
+    /// abort the config packet entirely. This plugin wraps the key in [`crate::crypto`]
+    /// and hands the result in through `encryption`: the control plane computes it per
+    /// player at registration time, and passes `None` when the client sent no usable key
+    /// so the client falls back to plaintext audio exactly like upstream's `null`.
     #[must_use]
-    pub fn config_packet(&self) -> ConfigPacket {
+    pub fn config_packet(&self, encryption: Option<EncryptionInfo>) -> ConfigPacket {
         ConfigPacket {
             server_id: self.server_id,
             capture_info: capture_info(),
-            encryption: None,
+            encryption,
             source_lines: self.source_lines(),
             activations: self.activations(),
             permissions: self.permissions(),
@@ -352,9 +352,12 @@ mod tests {
     #[test]
     fn a_config_packet_always_carries_the_fields_a_client_dereferences() {
         let id = Uuid::from_u128(0x1234_5678);
-        let packet = ServerConfig::new(id).config_packet();
+        let packet = ServerConfig::new(id).config_packet(None);
         assert_eq!(packet.server_id, id);
-        assert!(packet.encryption.is_none(), "documented: plaintext audio");
+        assert!(
+            packet.encryption.is_none(),
+            "no key offered: plaintext audio"
+        );
         assert_eq!(packet.activations.len(), 1);
         assert_eq!(packet.source_lines.len(), 1);
         assert!(packet.player_icon_config.is_some());
@@ -370,7 +373,7 @@ mod tests {
         use plasmo_voice_core::{PacketDirection, TcpCodec, TcpPacket};
 
         let codec = TcpCodec::new();
-        let packet = ServerConfig::new(Uuid::from_u128(0xfeed)).config_packet();
+        let packet = ServerConfig::new(Uuid::from_u128(0xfeed)).config_packet(None);
         let bytes = codec
             .encode(&TcpPacket::Config(packet.clone()))
             .expect("encode");

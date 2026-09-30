@@ -8,6 +8,7 @@
 //! | Module | Target | Responsibility |
 //! | --- | --- | --- |
 //! | [`state`] | any | The persisted server state (port, secret UUID, version), its file I/O, and secret generation. Plain Rust, unit-tested on the host. |
+//! | [`crypto`] | any | The `ConfigPacket.encryption` key exchange: RSA-wrapping the server-wide AES key with each client's public key. Plain Rust, unit-tested on the host. |
 //! | [`config`] | any | The `ConfigPacket` this server advertises, and the version/distance rules the client's packets are gated on. |
 //! | [`language`] | any | The translation table (`languages/list` plus one file per locale) and the locale lookup a `LanguageRequestPacket` is answered from. |
 //! | [`control`] | any | The control plane state machine: the join handshake, the registration burst, and every serverbound packet's reply. Returns messages to deliver; knows nothing about Pumpkin. |
@@ -48,6 +49,7 @@ use uuid::Uuid;
 
 pub mod config;
 pub mod control;
+pub mod crypto;
 pub mod language;
 pub mod runtime;
 pub mod server;
@@ -230,6 +232,7 @@ mod glue {
     use pumpkin_plugin_api::{Context, Plugin, PluginMetadata, permissions, register_plugin};
     use uuid::Uuid;
 
+    use crate::crypto::AesKey;
     use crate::runtime::{VoiceRuntime, bind, with_runtime};
     use crate::server::VoiceServer;
     use crate::state::VoiceServerState;
@@ -287,13 +290,41 @@ mod glue {
             persisted.port = port;
             persisted.secret.clone_from(&secret);
             persisted.protocol_version = plasmo_voice_core::PROTOCOL_VERSION.to_string();
+
+            // The AES key is the one value that must be cryptographically strong:
+            // it is wrapped per client into `ConfigPacket.encryption`. Generate once
+            // on first load and keep it verbatim afterwards — a reload must never
+            // silently rotate a key connected clients are already using.
+            let aes_key = if persisted.aes_key.is_empty() {
+                AesKey::generate()
+                    .map_err(|error| format!("cannot generate the AES key: {error}"))?
+            } else {
+                match AesKey::from_hex(&persisted.aes_key) {
+                    Ok(key) => key,
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "the persisted AES key does not parse; generating a fresh one \
+                             (every connected client must reconnect)"
+                        );
+                        AesKey::generate()
+                            .map_err(|error| format!("cannot regenerate the AES key: {error}"))?
+                    }
+                }
+            };
+            persisted.aes_key = aes_key.to_hex();
+
             persisted.save(&folder)?;
 
             let parsed_secret = Uuid::parse_str(&secret)
                 .map_err(|error| format!("generated secret {secret:?} is not a UUID: {error}"))?;
 
             with_runtime(|runtime| {
-                runtime.start(socket, VoiceServer::new(parsed_secret), folder.clone());
+                runtime.start(
+                    socket,
+                    VoiceServer::new(parsed_secret, aes_key),
+                    folder.clone(),
+                );
             });
 
             // The tick pump is the data plane's clock: without it the socket is never
@@ -326,22 +357,27 @@ mod glue {
             // Flush the current endpoint before the socket goes away. Everything is
             // read out first and the runtime torn down in the same lock scope, so a
             // tick landing mid-unload can only observe the already-stopped state.
-            let (folder, listening, connections, received, sent) = with_runtime(|runtime| {
-                let folder = runtime.data_folder().to_string();
-                let endpoint = runtime
-                    .port()
-                    .map(|port| (port, runtime.server_secret().unwrap_or_else(Uuid::nil)));
-                let connections = runtime.connection_count();
-                let received = runtime.received();
-                let sent = runtime.sent();
-                runtime.stop();
-                (folder, endpoint, connections, received, sent)
-            });
+            let (folder, listening, connections, received, sent, aes_key) =
+                with_runtime(|runtime| {
+                    let folder = runtime.data_folder().to_string();
+                    // The AES key must be read before `stop`: it lives on the
+                    // protocol, which `stop` tears down.
+                    let aes_key = runtime.server_aes_key();
+                    let endpoint = runtime
+                        .port()
+                        .map(|port| (port, runtime.server_secret().unwrap_or_else(Uuid::nil)));
+                    let connections = runtime.connection_count();
+                    let received = runtime.received();
+                    let sent = runtime.sent();
+                    runtime.stop();
+                    (folder, endpoint, connections, received, sent, aes_key)
+                });
 
             if let Some((port, secret)) = listening {
                 let state = VoiceServerState {
                     port,
                     secret: secret.to_string(),
+                    aes_key: aes_key.map_or_else(String::new, |key| key.to_hex()),
                     protocol_version: plasmo_voice_core::PROTOCOL_VERSION.to_string(),
                     enabled: true,
                 };

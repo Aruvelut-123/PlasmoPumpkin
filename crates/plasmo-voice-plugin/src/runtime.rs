@@ -249,6 +249,17 @@ impl VoiceRuntime {
         self.protocol.as_ref().map(VoiceServer::server_secret)
     }
 
+    /// A clone of the server-wide AES key, or `None` when not loaded.
+    ///
+    /// Cloned because the protocol keeps it owned; the only caller re-persists it
+    /// after `stop` has torn the protocol down.
+    #[must_use]
+    pub fn server_aes_key(&self) -> Option<crate::crypto::AesKey> {
+        self.protocol
+            .as_ref()
+            .map(|protocol| protocol.aes_key().clone())
+    }
+
     /// The number of connected voice clients, or `0` when not loaded.
     #[must_use]
     pub fn connection_count(&self) -> usize {
@@ -500,7 +511,11 @@ mod tests {
         let mut runtime = VoiceRuntime::new();
         runtime.start(
             UdpSocket::bind("127.0.0.1:0").expect("ephemeral bind"),
-            VoiceServer::new(Uuid::nil()),
+            VoiceServer::new(
+                Uuid::nil(),
+                crate::crypto::AesKey::from_hex("00112233445566778899aabbccddeeff")
+                    .expect("test key"),
+            ),
             "/tmp/voice".to_string(),
         );
         assert!(runtime.is_listening());
