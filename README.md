@@ -80,6 +80,26 @@ Both are driven from the one clock the guest has: the Pumpkin tick event (see
 [`crates/plasmo-voice-plugin/src/runtime.rs`](crates/plasmo-voice-plugin/src/runtime.rs)),
 since Pumpkin 0.2.0 puts no `on_tick` on the `Plugin` trait.
 
+### What is not implemented yet
+
+The session path above is complete — a registered player's audio reaches the other
+connections — but this is not yet full upstream parity. In rough order of importance:
+
+* **The post-registration control-plane burst.** Upstream answers the first UDP datagram
+  with `sendConfigInfo` + `sendPlayerList` + `broadcastPlayerInfoUpdate`, i.e. a
+  clientbound `ConfigPacket`, `PlayerListPacket` and `PlayerInfoUpdatePacket`. This plugin
+  returns only the `ConnectionPacket`; the other codecs exist in `plasmo-voice-core` with
+  round-trip tests, but nothing wires them to the control plane yet.
+* **Audio is broadcast, not positional.** Upstream decides who receives a
+  `PlayerAudioPacket` from activations, source lines and player positions. This server fans
+  every frame out to every *other* connection: correct for one voice channel, wrong for
+  anything distance-based.
+* **Source and self audio are not relayed.** `SourceAudio` (server → clients, for non-player
+  sources) and `SelfAudioInfo` are decoded and dropped.
+* **The rest of the control plane.** `PlayerInfo`, `PlayerState`, `PlayerAudioEnd`,
+  `SourceInfo`, activations and source-line synchronisation are all implemented in the core
+  crate but have no plugin-side handler.
+
 ---
 
 ## Protocol summary

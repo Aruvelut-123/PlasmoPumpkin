@@ -192,7 +192,7 @@ fixing the disagreement is part of your change.
 
 ## 10. Current work queue
 
-1. **`plasmo-voice-plugin` is functional end to end.** The `Plugin` impl, the
+1. **The connect → ping → relay path is complete end to end.** The `Plugin` impl, the
    `plasmo:voice/v2` IPC control plane, the in-guest UDP server (`network.udp.bind`), the
    keep-alive/timeout sweep and persistence into `context.get_data_folder()` are all in
    place. `server.rs` owns the protocol logic: a player registry mirroring upstream's
@@ -221,5 +221,11 @@ fixing the disagreement is part of your change.
    tests stayed green. Keep the WASI-only glue thin so this stays possible: anything
    host-testable (for example `player_connect_reply`, the reply builder) belongs in
    `lib.rs` **outside** the `cfg` gate.
-3. **Keep this file and `README.md` in sync with reality.** If a claim in either document
+3. Known gaps, in the order they matter (all documented in `README.md` under "What is not
+   implemented yet"): the post-registration control-plane burst (`ConfigPacket`,
+   `PlayerListPacket`, `PlayerInfoUpdatePacket`) is not sent; audio fan-out is a broadcast
+   rather than upstream's activation/position filtering; `SourceAudio` and `SelfAudioInfo`
+   are dropped; and the remaining control-plane packets have no plugin-side handler. Do not
+   describe the plugin as "fully compatible" while those are open.
+4. **Keep this file and `README.md` in sync with reality.** If a claim in either document
    is wrong, fixing it is part of your change.
