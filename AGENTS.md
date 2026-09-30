@@ -311,10 +311,10 @@ fixing the disagreement is part of your change.
    anything host-testable (for example `player_connect_reply`, the reply builder) belongs in
    `lib.rs` **outside** the `cfg` gate.
 3. Known gaps, in the order they matter (the user-facing summary is `README.md` →
-   "Limitations"): `ConfigPacket.encryption` is `null` **only when the client sends no
-   usable public key**, so audio is plaintext in that fallback (the server otherwise
-   encrypts audio end‑to‑end with an RSA‑wrapped AES key); only the proximity activation
-   and source line exist, with no TOML
+   "Limitations"): a client that offers **no usable public key** falls back to plaintext
+   audio (`ConfigPacket.encryption` is `null` — the server otherwise encrypts audio
+   end‑to‑end with an RSA‑wrapped AES key); only the proximity activation and source line
+   exist, with no TOML
    config; permissions and `canSee`/vanish are not enforced; there is no server-side mute
    manager; positions come from `PlayerMoveEvent` rather than live world reads; and the
    decoration packets (`ConfigPlayerInfo`, `DistanceVisualize`, `AnimatedActionBar`, the

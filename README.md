@@ -53,6 +53,17 @@ answered — on a headless server it cannot be, and Pumpkin then caches the deni
 `plugins/permission_cache.json` — the plugin is not running at all, so the block above is
 the way out.
 
+## How it works
+
+* **End-to-end audio encryption** — at registration the server generates a 16-byte AES
+  key and wraps it per client with RSA/PKCS1v15, exactly like upstream
+  `VoiceTcpServerConnectionManager`; the `ConfigPacket.encryption` field carries it, and
+  the already-encrypted Opus frames are relayed verbatim. The server never touches the
+  audio cipher.
+* **Proximity voice** — players hear each other by distance, with the activation and
+  source line from the in-game voice settings screen.
+* **Localized replies** — `LanguagePacket` is answered in the client's own locale.
+
 ## Logs
 
 A loaded server prints, at startup:
@@ -89,10 +100,8 @@ line's name.
 
 The connect → config → relay path works end to end, but this is not full upstream parity:
 
-* Audio is **encrypted end to end** — the server ships a per-client RSA-wrapped AES key
-  (`ConfigPacket.encryption`, like upstream) and relays the already-encrypted Opus frames
-  verbatim. A client that presents no usable public key falls back to plaintext, matching
-  upstream's `encryption == null` path.
+* A client that presents no usable public key falls back to **plaintext audio**
+  (`ConfigPacket.encryption` is `null`), matching upstream's `encryption == null` path.
 * Only the **proximity** activation and source line exist; there is no config file.
 * **Permissions and `canSee`/vanish are not enforced**, and there is no server-side mute
   manager.
