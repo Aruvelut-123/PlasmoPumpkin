@@ -108,10 +108,19 @@ fn audio_from_one_client_reaches_the_other_over_real_sockets() {
     drain(&bob);
 
     // Alice speaks.
+    //
+    // The relay is proximity-filtered, so the host has to have told the server where both
+    // players are — two blocks apart, in the same world.
+    let activation = {
+        let protocol = runtime.protocol_mut().expect("protocol");
+        protocol.set_position(&ALICE, Some("world".to_string()), (0.0, 64.0, 0.0));
+        protocol.set_position(&BOB, Some("world".to_string()), (2.0, 64.0, 0.0));
+        protocol.config().activations()[0].id
+    };
     let audio = PlayerAudioPacket {
         sequence_number: 7,
         data: vec![0xde, 0xad, 0xbe, 0xef],
-        activation_id: Uuid::from_u128(0x5),
+        activation_id: activation,
         distance: 16,
         stereo: false,
     };
@@ -135,7 +144,7 @@ fn audio_from_one_client_reaches_the_other_over_real_sockets() {
                 // A keep-alive ping may interleave with the audio; skip it.
                 if matches!(
                     codec
-                        .decode(&frame, PacketDirection::Server)
+                        .decode(&frame, PacketDirection::Client)
                         .expect("decode ok")
                         .expect("packet"),
                     UdpPacket::Ping(_)
@@ -157,28 +166,46 @@ fn audio_from_one_client_reaches_the_other_over_real_sockets() {
         envelope.secret, bob_secret,
         "the relayed frame is addressed to bob's own secret"
     );
-    assert_eq!(
-        codec
-            .decode(&frame, PacketDirection::Server)
-            .expect("decode ok")
-            .expect("packet"),
-        UdpPacket::PlayerAudio(audio)
-    );
+    // The clientbound form is `SourceAudioPacket`: the identical payload, tagged with the
+    // speaker's source so a listener can tell who is talking.
+    match codec
+        .decode(&frame, PacketDirection::Client)
+        .expect("decode ok")
+        .expect("packet")
+    {
+        UdpPacket::SourceAudio(source) => {
+            assert_eq!(source.sequence_number, 7);
+            assert_eq!(source.data, vec![0xde, 0xad, 0xbe, 0xef]);
+            assert_eq!(
+                source.source_id,
+                runtime
+                    .protocol()
+                    .expect("protocol")
+                    .source_id_of(&ALICE)
+                    .expect("alice has a source")
+            );
+            assert_eq!(source.distance, 16);
+        }
+        other => panic!("expected source audio, got {other:?}"),
+    }
 
-    // Alice must not hear her own voice back.
+    // Alice must not hear her own *audio* back. She does get a `SelfAudioInfoPacket`,
+    // which is how upstream tells a speaker its stream is live, and keep-alive pings.
     let mut own = [0u8; 2048];
     while let Ok((len, _)) = alice.recv_from(&mut own) {
         let frame = own[..len].to_vec();
-        assert!(
-            matches!(
-                codec
-                    .decode(&frame, PacketDirection::Server)
-                    .expect("decode ok")
-                    .expect("packet"),
-                UdpPacket::Ping(_)
+        match codec
+            .decode(&frame, PacketDirection::Client)
+            .expect("decode ok")
+            .expect("packet")
+        {
+            UdpPacket::Ping(_) | UdpPacket::SelfAudioInfo(_) => {}
+            UdpPacket::SourceAudio(source) => panic!(
+                "alice received source audio ({}), which must never be her own",
+                source.source_id
             ),
-            "alice received something other than a keep-alive"
-        );
+            other => panic!("alice received something unexpected: {other:?}"),
+        }
     }
 }
 

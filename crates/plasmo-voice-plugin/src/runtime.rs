@@ -30,6 +30,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use uuid::Uuid;
 
+use crate::control::Outbound;
 use crate::server::{KEEP_ALIVE_TIMEOUT_MS, Outgoing, VoiceServer, now_ms};
 
 /// Maximum datagrams drained from the socket per tick.
@@ -59,7 +60,39 @@ pub struct VoiceRuntime {
     /// How long a connection may stay silent before it is retired, mirroring
     /// upstream's `VoiceServerConfig.keepAliveTimeoutMs`.
     keep_alive_timeout_ms: u64,
+    /// Control-plane messages waiting to be delivered over the `plasmo:voice` channel.
+    ///
+    /// The socket and the channel are driven from the same tick but cannot be used from
+    /// the same borrow: the tick pump drains the socket here, then hands these to the
+    /// channel sender. A queue is what keeps the protocol logic free of both.
+    control: Vec<Outbound>,
+    /// Players whose `PlayerInfoRequestPacket` is still unanswered, with the retry
+    /// schedule (`PlayerInfoRequestScheduler` upstream).
+    waiting_info: Vec<WaitingInfo>,
+    /// The address advertised in `ConnectionPacket.ip`.
+    ///
+    /// `0.0.0.0` is not a placeholder: a Plasmo Voice client that reads it substitutes the
+    /// host it is already connected to for Minecraft (`ModServerConnection:243-244`), which
+    /// is exactly the right answer for a server whose voice port sits on the same machine
+    /// — and it is the only answer a guest can give without knowing its own public IP.
+    advertised_ip: String,
 }
+
+/// One unanswered `PlayerInfoRequestPacket`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WaitingInfo {
+    player: Uuid,
+    /// When the next request is due.
+    next_at_ms: u64,
+    /// How many requests have been sent already (upstream's maximum is 5).
+    attempts: u8,
+}
+
+/// The delays between `PlayerInfoRequestPacket` retries, in ms.
+///
+/// `PlayerInfoRequestScheduler.schedule` upstream: the first request goes out on join, then
+/// the 500 ms sweep retries at +1/3/5/10/15 s and gives up.
+const INFO_RETRY_DELAYS_MS: [u64; 5] = [1_000, 3_000, 5_000, 10_000, 15_000];
 
 impl VoiceRuntime {
     /// An unloaded runtime: no socket, no protocol state, no data folder.
@@ -72,7 +105,75 @@ impl VoiceRuntime {
             received: AtomicU64::new(0),
             sent: AtomicU64::new(0),
             keep_alive_timeout_ms: KEEP_ALIVE_TIMEOUT_MS,
+            control: Vec::new(),
+            waiting_info: Vec::new(),
+            advertised_ip: "0.0.0.0".to_string(),
         }
+    }
+
+    /// Overrides the address advertised to clients in `ConnectionPacket.ip`.
+    pub fn set_advertised_ip(&mut self, ip: impl Into<String>) {
+        self.advertised_ip = ip.into();
+    }
+
+    /// The address advertised to clients in `ConnectionPacket.ip`.
+    #[must_use]
+    pub fn advertised_ip(&self) -> &str {
+        &self.advertised_ip
+    }
+
+    /// Queues a `PlayerInfoRequestPacket` for a player, with upstream's retry schedule.
+    pub fn request_player_info(&mut self, player: Uuid, now: u64) {
+        if self
+            .waiting_info
+            .iter()
+            .any(|waiting| waiting.player == player)
+        {
+            return;
+        }
+        self.waiting_info.push(WaitingInfo {
+            player,
+            next_at_ms: now,
+            attempts: 0,
+        });
+    }
+
+    /// Stops retrying `player`: it answered, so the handshake is under way.
+    pub fn player_identified(&mut self, player: &Uuid) {
+        self.waiting_info
+            .retain(|waiting| waiting.player != *player);
+    }
+
+    /// Emits the `PlayerInfoRequestPacket`s that are due.
+    ///
+    /// Called from [`Self::pump`], so the retry schedule rides the server tick — the same
+    /// 500 ms cadence upstream's scheduler runs at, only finer (~20 Hz).
+    fn schedule_info_requests(&mut self, now: u64) {
+        let Some(protocol) = self.protocol.as_ref() else {
+            return;
+        };
+        for waiting in &mut self.waiting_info {
+            if now < waiting.next_at_ms {
+                continue;
+            }
+            let payload = protocol.request_player_info();
+            tracing::debug!(
+                player = %waiting.player,
+                attempt = waiting.attempts + 1,
+                "asking a client to identify itself"
+            );
+            self.control
+                .push(Outbound::to_player(waiting.player, payload));
+            let delay = INFO_RETRY_DELAYS_MS
+                [usize::from(waiting.attempts).min(INFO_RETRY_DELAYS_MS.len() - 1)];
+            waiting.attempts = waiting.attempts.saturating_add(1);
+            waiting.next_at_ms = now.saturating_add(delay);
+        }
+        // Upstream sends the request on join and retries five times; after that the client
+        // is left alone until it registers the channel again.
+        let max_attempts = INFO_RETRY_DELAYS_MS.len() as u8 + 1;
+        self.waiting_info
+            .retain(|waiting| waiting.attempts < max_attempts);
     }
 
     /// Overrides how long a silent connection may live.
@@ -106,6 +207,8 @@ impl VoiceRuntime {
     pub fn stop(&mut self) -> String {
         self.socket = None;
         self.protocol = None;
+        self.control.clear();
+        self.waiting_info.clear();
         std::mem::take(&mut self.data_folder)
     }
 
@@ -170,6 +273,7 @@ impl VoiceRuntime {
         let mut received = 0u64;
         let mut sent = 0u64;
         let mut buffer = [0u8; RECV_BUFFER];
+        let mut control: Vec<Outbound> = Vec::new();
 
         for _ in 0..MAX_DATAGRAMS_PER_TICK {
             let (len, from) = match socket.recv_from(&mut buffer) {
@@ -186,16 +290,42 @@ impl VoiceRuntime {
 
             let handled = protocol.handle_datagram(&from.to_string(), &buffer[..len]);
             sent += send_datagrams(socket, handled.outgoing);
+            control.extend(handled.control);
         }
 
         // Keep-alive shares the socket's clock. Pumpkin 0.2.0 puts no `on_tick` on
         // the `Plugin` trait, so this tick *event* is the only timer the guest has
         // — the same job upstream schedules every 100ms in `NettyUdpKeepAlive`.
-        sent += send_datagrams(socket, protocol.keep_alive(now_ms(), timeout_ms));
+        //
+        // The cadence matters more than it looks: a Plasmo Voice client treats itself as
+        // `connected` only while it keeps *receiving* pings, goes soft-dead after 7s
+        // without one (it stops sending audio) and tears the whole connection down at
+        // 30s. The sweep pings a new connection immediately and then every 2.5-4s, which
+        // sits comfortably inside that window.
+        let sweep = protocol.keep_alive(now_ms(), timeout_ms);
+        sent += send_datagrams(socket, sweep.outgoing);
+        control.extend(sweep.control);
+        self.control.extend(control);
+
+        // `PlayerInfoRequestPacket` retries, on the same clock as everything else.
+        self.schedule_info_requests(now_ms());
 
         self.received.fetch_add(received, Ordering::Relaxed);
         self.sent.fetch_add(sent, Ordering::Relaxed);
         (received, sent)
+    }
+
+    /// Takes the control-plane messages produced since the last call.
+    ///
+    /// The tick pump drains the socket; whoever owns the channel sends these. Splitting
+    /// the two keeps the socket borrow and the channel borrow from overlapping.
+    pub fn take_control(&mut self) -> Vec<Outbound> {
+        std::mem::take(&mut self.control)
+    }
+
+    /// Queues a control-plane message for the next [`Self::pump`] consumer.
+    pub fn push_control(&mut self, message: Outbound) {
+        self.control.push(message);
     }
 
     /// Borrows the protocol state machine, or `None` when not loaded.

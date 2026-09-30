@@ -8,9 +8,15 @@
 
 use std::collections::HashMap;
 
-use plasmo_voice_core::wire::PingPacket;
+use plasmo_voice_core::data::{
+    CodecInfo, PlayerSourceInfo, SelfSourceInfo, SourceInfo, SourceInfoBase, VoicePlayerInfo,
+};
+use plasmo_voice_core::wire::{PingPacket, SelfAudioInfoPacket, SourceAudioPacket};
 use plasmo_voice_core::{PacketDirection, UdpCodec, UdpPacket};
 use uuid::Uuid;
+
+use crate::config::{MAX_EXTRA_AUDIO_BROADCAST_DISTANCE, ServerConfig, calculate_allowed_distance};
+use crate::control::{ControlPlane, Outbound};
 
 /// A client known to the voice server.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,8 +25,24 @@ pub struct Client {
     pub secret: Uuid,
     /// `host:port` the client is speaking from.
     pub address: String,
+    /// The endpoint the client reported seeing this server at, from the first
+    /// `PingPacket` it sent (upstream `UdpConnection.getConnectionAddress`).
+    ///
+    /// Informational only: it is **not** where datagrams are sent. Upstream keeps this
+    /// and `remoteAddress` in two separate fields, and only `remoteAddress` — the
+    /// address a datagram actually arrived from — is ever a send target.
+    pub connection_address: Option<String>,
     /// The player this connection belongs to, when bound over the control plane.
-    pub player_id: Option<String>,
+    pub player_id: Option<Uuid>,
+    /// The player's audio source id (upstream `VoiceServerPlayerSource.id`, a fresh
+    /// random UUID per player). Listeners learn it from a `SourceInfoPacket` and see it
+    /// on every relayed `SourceAudioPacket`, so it must be stable for the session.
+    pub source_id: Uuid,
+    /// The source's state byte (upstream `BaseServerAudioSource.state`): starts at 1 and
+    /// moves by +1 on name/icon changes and +10 on stereo changes, wrapping at
+    /// `i8::MAX`. A client drops frames whose state is more than 10 away from its cached
+    /// value, so this must only change when upstream would change it.
+    pub source_state: i8,
     /// Wall-clock ms of the last datagram seen from this client
     /// (upstream `UdpServerConnection.getLastReceivedPacketTimestamp`).
     pub last_received_ms: u64,
@@ -36,7 +58,10 @@ pub struct Client {
 /// player, ships it to the client inside a clientbound `ConnectionPacket`, and
 /// `NettyPacketHandler` then refuses every datagram whose secret is not in that
 /// map. Without a registration a connection can never come into existence.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// The player's *state* lives here rather than on the connection because upstream keeps
+/// it on the player (`BaseVoicePlayer`), and it outlives a UDP reconnect.
+#[derive(Debug, Clone, PartialEq)]
 pub struct RegisteredPlayer {
     /// The Minecraft player UUID.
     pub player_id: Uuid,
@@ -44,6 +69,20 @@ pub struct RegisteredPlayer {
     pub secret: Uuid,
     /// Display name, when the control plane supplied one.
     pub name: Option<String>,
+    /// The audio source id this player's voice is published under.
+    pub source_id: Uuid,
+    /// Server-side mute (`VoiceMuteManager`); false until a mute manager exists.
+    pub muted: bool,
+    /// The client reported voice chat disabled (clientbound `PlayerStatePacket`).
+    pub voice_disabled: bool,
+    /// The client reported its microphone muted.
+    pub microphone_muted: bool,
+    /// Distances the client asked for, per activation (`PlayerActivationDistancesPacket`).
+    pub activation_distances: Vec<(Uuid, i32)>,
+    /// Last known position, from a move event or a per-tick refresh.
+    pub position: Option<(f64, f64, f64)>,
+    /// Last known world (`world.get-id`), so the relay can refuse cross-world audio.
+    pub world: Option<String>,
 }
 
 /// Milliseconds between keep-alive pings to an idle connection.
@@ -70,6 +109,15 @@ pub fn now_ms() -> u64 {
         })
 }
 
+/// A stable seed derived from a secret and a salt.
+///
+/// Used where the value must be *reproducible* for a given secret rather than
+/// unpredictable, so a test can assert it.
+fn seed_for(secret: &Uuid, salt: u64) -> u64 {
+    let wide = secret.as_u128();
+    (wide as u64) ^ ((wide >> 64) as u64) ^ salt.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+}
+
 /// One outgoing datagram produced by [`VoiceServer::handle_datagram`] or
 /// [`VoiceServer::keep_alive`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,8 +129,11 @@ pub struct Outgoing {
 /// Decides what the server does with an inbound datagram.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Handled {
-    /// Datagrams to send back (forwarded audio; pings are never answered).
+    /// Datagrams to send back (relayed audio and self-info; pings are never answered).
     pub outgoing: Vec<Outgoing>,
+    /// Control-plane messages to deliver over the `plasmo:voice` channel. The very first
+    /// datagram of a session produces the registration burst here.
+    pub control: Vec<Outbound>,
     /// Set when the packet was a ping — a registration request or keep-alive ack.
     pub was_ping: bool,
 }
@@ -91,9 +142,19 @@ impl Handled {
     fn nothing() -> Self {
         Self {
             outgoing: Vec::new(),
+            control: Vec::new(),
             was_ping: false,
         }
     }
+}
+
+/// What one keep-alive sweep produced.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Sweep {
+    /// Keep-alive pings to send.
+    pub outgoing: Vec<Outgoing>,
+    /// Disconnect broadcasts for the connections the sweep retired.
+    pub control: Vec<Outbound>,
 }
 
 /// The Plasmo Voice UDP server.
@@ -104,6 +165,9 @@ impl Handled {
 #[derive(Debug)]
 pub struct VoiceServer {
     codec: UdpCodec,
+    /// The `plasmo:voice` control plane: secrets, config and the packets a client
+    /// exchanges with us over the plugin-message channel.
+    control: ControlPlane,
     /// secret -> client
     by_secret: HashMap<Uuid, Client>,
     /// address -> secret
@@ -124,10 +188,14 @@ pub struct VoiceServer {
 
 impl VoiceServer {
     /// Creates a server whose advertised secret is `server_secret`.
+    ///
+    /// The server id in the clientbound `ConfigPacket` is the same secret: it identifies
+    /// this voice server to the client's own config store.
     #[must_use]
     pub fn new(server_secret: Uuid) -> Self {
         Self {
             codec: UdpCodec::new(),
+            control: ControlPlane::new(server_secret),
             by_secret: HashMap::new(),
             by_address: HashMap::new(),
             registered: HashMap::new(),
@@ -136,6 +204,48 @@ impl VoiceServer {
             server_secret,
             dropped: 0,
         }
+    }
+
+    /// The control plane (config + packet state machine).
+    #[must_use]
+    pub const fn control(&self) -> &ControlPlane {
+        &self.control
+    }
+
+    /// The server's voice configuration.
+    #[must_use]
+    pub fn config(&self) -> &ServerConfig {
+        self.control.config()
+    }
+
+    /// Handles one `plasmo:voice` control payload, returning the messages to deliver.
+    ///
+    /// The control plane is stateless, so this clones it to break the borrow overlap:
+    /// `ControlPlane::handle` needs the plane *and* the server at once. The clone is a
+    /// `Uuid` plus a stateless codec, which is far cheaper than a second source of truth
+    /// would be.
+    pub fn handle_control(
+        &mut self,
+        player: Uuid,
+        name: &str,
+        ip: &str,
+        port: u16,
+        data: &[u8],
+    ) -> Vec<Outbound> {
+        let control = self.control.clone();
+        control.handle(self, player, name, ip, port, data)
+    }
+
+    /// Forgets a player who left the Minecraft server, announcing it to the others.
+    pub fn control_disconnect(&mut self, player: Uuid) -> Vec<Outbound> {
+        let control = self.control.clone();
+        control.disconnect(self, player)
+    }
+
+    /// The encoded `PlayerInfoRequestPacket` (phase 1 of the handshake).
+    #[must_use]
+    pub fn request_player_info(&self) -> Vec<u8> {
+        self.control.request_player_info()
     }
 
     /// The secret this server advertises to clients.
@@ -183,7 +293,7 @@ impl VoiceServer {
         &mut self,
         secret: Uuid,
         address: String,
-        player_id: Option<String>,
+        player_id: Option<Uuid>,
     ) {
         // One connection per secret and per address, like upstream's maps.
         //
@@ -202,11 +312,25 @@ impl VoiceServer {
         {
             self.by_secret.remove(&old);
         }
+        // The source id belongs to the *player* (upstream caches one
+        // `VoiceServerPlayerSource` per player UUID forever), so a reconnect keeps the
+        // id its listeners already know. A connection with no registration of its own
+        // can only come from a test, and gets a fresh id.
+        let source_id = player_id
+            .and_then(|id| self.registered.get(&id))
+            .map_or_else(
+                || crate::state::VoiceServerState::generate_secret_uuid(seed_for(&secret, 0x51)),
+                |p| p.source_id,
+            );
         let now = now_ms();
         let client = Client {
             secret,
             address: address.clone(),
+            connection_address: None,
             player_id,
+            source_id,
+            // `BaseServerAudioSource.state` starts at 1.
+            source_state: 1,
             last_received_ms: now,
             // Upstream's `sentKeepAlive` starts unset, so the first sweep pings
             // the new connection immediately; that first ping is also what makes
@@ -272,6 +396,18 @@ impl VoiceServer {
                 player_id,
                 secret,
                 name,
+                // Upstream mints `UUID.randomUUID()` for the player's source when the
+                // source is first created; minting it at registration gives the same
+                // guarantee (stable per player) with one less lazy branch.
+                source_id: crate::state::VoiceServerState::generate_secret_uuid(
+                    seed ^ 0x5350_4157_4e5f_5349,
+                ),
+                muted: false,
+                voice_disabled: false,
+                microphone_muted: false,
+                activation_distances: Vec::new(),
+                position: None,
+                world: None,
             },
         );
         self.player_by_secret.insert(secret, player_id);
@@ -324,14 +460,270 @@ impl VoiceServer {
         players
     }
 
+    /// One registration, if the player is known.
+    #[must_use]
+    pub fn registered_player(&self, player_id: &Uuid) -> Option<&RegisteredPlayer> {
+        self.registered.get(player_id)
+    }
+
+    /// Players with a **live UDP connection**, which is upstream's `hasVoiceChat()`.
+    ///
+    /// Upstream's broadcasts only ever reach players whose connection was added — a
+    /// player who joined Minecraft but never completed the UDP handshake gets nothing.
+    #[must_use]
+    pub fn connected_player_ids(&self) -> Vec<Uuid> {
+        let mut ids: Vec<Uuid> = self
+            .by_secret
+            .values()
+            .filter_map(|client| client.player_id)
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    /// The client record for a player, if it is connected.
+    #[must_use]
+    pub fn client_by_player(&self, player_id: &Uuid) -> Option<&Client> {
+        self.by_secret
+            .values()
+            .find(|client| client.player_id.as_ref() == Some(player_id))
+    }
+
+    /// Applies a `PlayerStatePacket`, returning whether anything actually changed.
+    ///
+    /// Upstream only broadcasts when one of the two booleans flipped
+    /// (`BaseVoicePlayer.setVoiceDisabled` / `setMicrophoneMuted` return the change), and
+    /// its `hasVoiceChat()` guard means a player who is not connected is not tracked at
+    /// all.
+    pub fn set_player_state(
+        &mut self,
+        player_id: &Uuid,
+        voice_disabled: bool,
+        microphone_muted: bool,
+    ) -> bool {
+        let connected = self.client_by_player(player_id).is_some();
+        let Some(player) = self.registered.get_mut(player_id) else {
+            return false;
+        };
+        if !connected {
+            return false;
+        }
+        let changed =
+            player.voice_disabled != voice_disabled || player.microphone_muted != microphone_muted;
+        player.voice_disabled = voice_disabled;
+        player.microphone_muted = microphone_muted;
+        changed
+    }
+
+    /// Applies a `PlayerActivationDistancesPacket`.
+    ///
+    /// Unknown activations are skipped, like upstream (`PlayerChannelHandler` looks each
+    /// id up and silently ignores the ones it does not know).
+    pub fn set_activation_distances(&mut self, player_id: &Uuid, distances: Vec<(Uuid, i32)>) {
+        let known: Vec<Uuid> = self
+            .config()
+            .activations()
+            .into_iter()
+            .map(|activation| activation.id)
+            .collect();
+        let Some(player) = self.registered.get_mut(player_id) else {
+            return;
+        };
+        player.activation_distances = distances
+            .into_iter()
+            .filter(|(id, _)| known.contains(id))
+            .collect();
+    }
+
+    /// Records where a player is, which is what makes the proximity relay possible.
+    pub fn set_position(
+        &mut self,
+        player_id: &Uuid,
+        world: Option<String>,
+        position: (f64, f64, f64),
+    ) {
+        if let Some(player) = self.registered.get_mut(player_id) {
+            player.position = Some(position);
+            if world.is_some() {
+                player.world = world;
+            }
+        }
+    }
+
+    /// The `SourceInfo` a listener is told about `player_id`'s stream.
+    ///
+    /// Upstream answers a `SourceInfoRequestPacket` with
+    /// `VoiceServerPlayerSource.createSourceInfo` — the `PLAYER` variant: the shared
+    /// `SourceInfoBase` header plus the player's own `VoicePlayerInfo`. The base's
+    /// `addon_id` is empty for the built-in sources, the decoder is the default
+    /// `OpusDecoderInfo` (a bare `"opus"` codec with no parameters), and the source is
+    /// published on the proximity line.
+    #[must_use]
+    pub fn player_source_info(&self, player_id: &Uuid) -> Option<SourceInfo> {
+        let player = self.registered.get(player_id)?;
+        let client = self.client_by_player(player_id)?;
+        let nick = player.name.clone().unwrap_or_default();
+        Some(SourceInfo::Player(PlayerSourceInfo {
+            base: SourceInfoBase {
+                addon_id: String::new(),
+                id: player.source_id,
+                name: player.name.clone(),
+                state: client.source_state,
+                decoder_info: Some(CodecInfo {
+                    name: "opus".to_string(),
+                    params: Vec::new(),
+                }),
+                stereo: false,
+                line_id: self.config().source_lines()[0].id,
+                // Upstream's player source exposes its icon while the stream is live;
+                // a hidden icon is a per-player setting this server does not have.
+                icon_visible: true,
+                angle: 0,
+            },
+            player_info: VoicePlayerInfo {
+                player_id: player.player_id,
+                player_nick: nick,
+                muted: player.muted,
+                voice_disabled: player.voice_disabled,
+                microphone_muted: player.microphone_muted,
+            },
+        }))
+    }
+
+    /// The source id a listener sees audio from for `player_id`.
+    #[must_use]
+    pub fn source_id_of(&self, player_id: &Uuid) -> Option<Uuid> {
+        self.registered
+            .get(player_id)
+            .map(|player| player.source_id)
+    }
+
+    /// The player publishing `source_id`, if any.
+    #[must_use]
+    pub fn player_for_source_id(&self, source_id: &Uuid) -> Option<Uuid> {
+        self.registered
+            .values()
+            .find(|player| player.source_id == *source_id)
+            .map(|player| player.player_id)
+    }
+
+    /// The `VoicePlayerInfo` this server advertises for a player.
+    #[must_use]
+    pub fn voice_player_info(&self, player_id: &Uuid) -> Option<VoicePlayerInfo> {
+        let player = self.registered.get(player_id)?;
+        Some(VoicePlayerInfo {
+            player_id: player.player_id,
+            player_nick: player.name.clone().unwrap_or_default(),
+            muted: player.muted,
+            voice_disabled: player.voice_disabled,
+            microphone_muted: player.microphone_muted,
+        })
+    }
+
+    /// The `SelfSourceInfo` a speaker is sent when its stream ends.
+    ///
+    /// Upstream fills `sequenceNumber = -1` (`SelfActivationHelper.kt:96`) and the
+    /// activation the player was last using, so the client can close its own source.
+    #[must_use]
+    pub fn self_source_info(&self, player_id: &Uuid, activation_id: Uuid) -> SelfSourceInfo {
+        SelfSourceInfo {
+            source_info: self
+                .player_source_info(player_id)
+                .unwrap_or_else(|| self.source_info_placeholder(player_id)),
+            player_id: *player_id,
+            activation_id,
+            sequence_number: -1,
+        }
+    }
+
+    /// A `SourceInfo` for a player whose connection has just gone: the fields the client
+    /// needs to recognise the source it must close.
+    fn source_info_placeholder(&self, player_id: &Uuid) -> SourceInfo {
+        let (source_id, nick) = self
+            .registered
+            .get(player_id)
+            .map_or((Uuid::nil(), String::new()), |player| {
+                (player.source_id, player.name.clone().unwrap_or_default())
+            });
+        SourceInfo::Player(PlayerSourceInfo {
+            base: SourceInfoBase {
+                addon_id: String::new(),
+                id: source_id,
+                name: None,
+                state: 1,
+                decoder_info: None,
+                stereo: false,
+                line_id: self.config().source_lines()[0].id,
+                icon_visible: false,
+                angle: 0,
+            },
+            player_info: VoicePlayerInfo {
+                player_id: *player_id,
+                player_nick: nick,
+                muted: false,
+                voice_disabled: false,
+                microphone_muted: false,
+            },
+        })
+    }
+
+    /// `VoiceServerProximitySource.getListeners`: who hears `speaker`'s audio.
+    ///
+    /// Returns player ids, because the caller may need either their connection (to send a
+    /// datagram) or their control-plane identity (to send an audio-end). The activation
+    /// must be one this server offers, and its distance is clamped exactly like
+    /// `Activation.calculateAllowedDistance` before the radius is computed.
+    #[must_use]
+    pub fn proximity_listener_ids(
+        &self,
+        speaker: &Uuid,
+        activation_id: Uuid,
+        requested_distance: i32,
+    ) -> Vec<Uuid> {
+        let Some(activation) = self
+            .config()
+            .activations()
+            .into_iter()
+            .find(|activation| activation.id == activation_id)
+        else {
+            return Vec::new();
+        };
+        let distance = calculate_allowed_distance(&activation, requested_distance);
+        let radius = distance
+            .saturating_add(MAX_EXTRA_AUDIO_BROADCAST_DISTANCE)
+            .min(distance.saturating_mul(2));
+        let Some(source) = self.registered.get(speaker) else {
+            return Vec::new();
+        };
+        // `matchFilters` also drops a speaker whose own voice chat is off; upstream never
+        // gets that far because a disabled client stops sending audio.
+        if source.voice_disabled {
+            return Vec::new();
+        }
+
+        let mut listeners: Vec<Uuid> = self
+            .registered
+            .values()
+            .filter(|candidate| candidate.player_id != *speaker)
+            .filter(|candidate| !candidate.voice_disabled)
+            .filter(|candidate| within_proximity(source, candidate, radius))
+            .map(|candidate| candidate.player_id)
+            .collect();
+        listeners.sort();
+        listeners
+    }
+
     /// Pings idle connections and retires the silent ones.
     ///
     /// Mirrors `NettyUdpKeepAlive.tick`: a connection that has sent nothing for
     /// `timeout_ms` is removed, and every other connection gets an empty
-    /// `PingPacket` at most once per second. Upstream spreads the pings with
-    /// 1.5-3s of jitter; deriving that jitter from the secret keeps the spread
-    /// without needing an RNG in the guest. Returns the datagrams to send.
-    pub fn keep_alive(&mut self, now: u64, timeout_ms: u64) -> Vec<Outgoing> {
+    /// `PingPacket`. Upstream spreads the pings with 1.5-3s of jitter; deriving
+    /// that jitter from the secret keeps the spread without needing an RNG in the
+    /// guest. Retiring a connection also broadcasts a `PlayerDisconnectPacket`, and
+    /// leaves the *registration* alone — upstream's secret is sticky, so the same
+    /// client may come back on the same secret.
+    pub fn keep_alive(&mut self, now: u64, timeout_ms: u64) -> Sweep {
         let mut expired = Vec::new();
         let mut due = Vec::new();
 
@@ -345,11 +737,16 @@ impl VoiceServer {
             }
         }
 
+        let mut control = Vec::new();
         for secret in expired {
+            if let Some(player_id) = self.player_for_secret(&secret) {
+                control.extend(self.control.disconnected(player_id));
+            }
             self.remove_connection(&secret);
         }
 
-        due.into_iter()
+        let outgoing = due
+            .into_iter()
             .filter_map(|secret| {
                 let client = self.by_secret.get(&secret)?;
                 let ping = UdpPacket::Ping(PingPacket::new(None, 0));
@@ -360,7 +757,9 @@ impl VoiceServer {
                     data,
                 })
             })
-            .collect()
+            .collect();
+
+        Sweep { outgoing, control }
     }
 
     /// Handles one inbound datagram, returning what to send back.
@@ -372,6 +771,12 @@ impl VoiceServer {
     /// neither a live connection nor a control-plane registration. The server
     /// never answers traffic it does not recognise, which is what keeps a public
     /// UDP port from relaying a stranger's audio.
+    ///
+    /// A datagram whose secret is registered but not yet connected does **only one
+    /// thing**: it creates the connection (upstream's `handlePacket` lives in the branch
+    /// that datagram does not take) and produces the registration burst — config, player
+    /// list, player-info broadcast — as control-plane messages. The first datagram of a
+    /// session is therefore never relayed, exactly like upstream.
     pub fn handle_datagram(&mut self, from: &str, data: &[u8]) -> Handled {
         let envelope = match self.codec.decode_header(data) {
             Ok(Some(envelope)) => envelope,
@@ -383,15 +788,16 @@ impl VoiceServer {
         };
         let secret = envelope.secret;
 
+        let mut registered_now = None;
         if self.by_secret.contains_key(&secret) {
             // A client that roamed to another address is followed, like
             // upstream's `setRemoteAddress`.
             self.readdress(secret, from);
         } else if let Some(player_id) = self.player_by_secret.get(&secret).copied() {
             // First datagram from a *registered* player: this is where the UDP
-            // connection is born (`NettyPacketHandler` creates and adds it, then
-            // sends the config/player-list burst over the control plane).
-            self.add_connection(secret, from.to_string(), Some(player_id.to_string()));
+            // connection is born, and where upstream then sends the burst.
+            self.add_connection(secret, from.to_string(), Some(player_id));
+            registered_now = Some(player_id);
         } else {
             self.dropped = self.dropped.saturating_add(1);
             return Handled::nothing();
@@ -412,6 +818,27 @@ impl VoiceServer {
             client.last_received_ms = now;
         }
 
+        let was_ping = matches!(packet, UdpPacket::Ping(_));
+
+        if let Some(player_id) = registered_now {
+            // A ping carries the endpoint the *client* believes it is talking to, and
+            // upstream records it in `connectionAddress` (`NettyPacketHandler:60-65`) —
+            // a purely informational field. It is emphatically **not** where datagrams
+            // are sent: those go to `remoteAddress`, the datagram's sender (`:59`).
+            // Conflating the two would make the server send audio to itself.
+            if let UdpPacket::Ping(ping) = &packet
+                && let (Some(ip), Some(port)) = (ping.server_ip.as_deref(), ping.server_port)
+                && let Some(client) = self.by_secret.get_mut(&secret)
+            {
+                client.connection_address = Some(format!("{ip}:{port}"));
+            }
+            return Handled {
+                outgoing: Vec::new(),
+                control: self.control.registration_burst(self, player_id),
+                was_ping,
+            };
+        }
+
         match packet {
             // Upstream never answers a ping. A client pings once per second until
             // it hears from the server, and it answers *any* inbound ping with
@@ -422,18 +849,21 @@ impl VoiceServer {
             // means it did its job.
             UdpPacket::Ping(_) => Handled {
                 outgoing: Vec::new(),
+                control: Vec::new(),
                 was_ping: true,
             },
 
-            // Audio from a connected player: relay to everyone else.
-            UdpPacket::PlayerAudio(audio) => Handled {
-                outgoing: self.relay(from, |client| {
-                    self.codec
-                        .encode(&UdpPacket::PlayerAudio(audio.clone()), client.secret, 0)
-                        .unwrap_or_default()
-                }),
-                was_ping: false,
-            },
+            // Player audio: never forwarded as-is. Upstream builds a clientbound
+            // `SourceAudioPacket` for every listener in range and a `SelfAudioInfoPacket`
+            // for the speaker itself.
+            UdpPacket::PlayerAudio(audio) => {
+                let (outgoing, control) = self.relay_audio(secret, &audio);
+                Handled {
+                    outgoing,
+                    control,
+                    was_ping: false,
+                }
+            }
 
             // Source / activation audio from the server itself never arrives
             // inbound; treat anything else as unknown traffic.
@@ -444,27 +874,121 @@ impl VoiceServer {
         }
     }
 
-    /// Encodes `packet` once per connected client other than `from`, using that
-    /// client's own secret so only it can decrypt/accept the datagram.
-    fn relay<F>(&self, from: &str, mut encode: F) -> Vec<Outgoing>
-    where
-        F: FnMut(&Client) -> Vec<u8>,
-    {
-        let mut out = Vec::new();
-        for client in self.by_secret.values() {
-            if client.address == from {
+    /// The upstream proximity fan-out for one `PlayerAudioPacket`.
+    ///
+    /// The chain this reproduces is
+    /// `NettyUdpServerConnection.handle` → `VoiceServerActivationManager.onPlayerSpeak`
+    /// → `ProximityServerActivationHelper.onActivation` →
+    /// `VoiceServerProximitySource.sendAudioPacket`:
+    ///
+    /// 1. the activation id must be one this server offers, and the speaker must not be
+    ///    muted (server mute or the client's own microphone mute);
+    /// 2. the distance is **clamped** to one the activation allows;
+    /// 3. every *other* connected player within `min(distance + maxExtra, distance * 2)`
+    ///    gets a fresh `SourceAudioPacket` — same payload bytes, but its own secret and a
+    ///    fresh timestamp, because those live in the part of the frame that is per-client;
+    /// 4. the speaker gets a `SelfAudioInfoPacket` instead, so its own overlay can show
+    ///    the live stream without the server looping audio back to it.
+    ///
+    /// The speaker's audio is never encoded once and copied: the seconds-long payload is
+    /// shared, the ~20-byte envelope is not.
+    fn relay_audio(
+        &self,
+        speaker_secret: Uuid,
+        audio: &plasmo_voice_core::wire::PlayerAudioPacket,
+    ) -> (Vec<Outgoing>, Vec<Outbound>) {
+        let refused = (Vec::new(), Vec::new());
+        let Some(speaker) = self.by_secret.get(&speaker_secret) else {
+            return refused;
+        };
+        let Some(player_id) = speaker.player_id else {
+            return refused;
+        };
+        let Some(player) = self.registered.get(&player_id) else {
+            return refused;
+        };
+
+        // `getActivationById(activationId)`; an activation this server does not offer
+        // means the packet is not ours to relay.
+        let Some(activation) = self
+            .config()
+            .activations()
+            .into_iter()
+            .find(|activation| activation.id == audio.activation_id)
+        else {
+            return refused;
+        };
+        // `isMicrophoneMuted()` / server-mute guards, checked before anything is built.
+        if player.microphone_muted || player.muted || player.voice_disabled {
+            return refused;
+        }
+
+        let distance = calculate_allowed_distance(&activation, i32::from(audio.distance));
+        let distance_short = i16::try_from(distance).unwrap_or(i16::MAX);
+        let timestamp = i64::try_from(now_ms()).unwrap_or(i64::MAX);
+
+        let mut outgoing = Vec::new();
+        for listener_id in
+            self.proximity_listener_ids(&player_id, audio.activation_id, i32::from(audio.distance))
+        {
+            let Some(listener) = self.client_by_player(&listener_id) else {
                 continue;
-            }
-            let data = encode(client);
-            if !data.is_empty() {
-                out.push(Outgoing {
-                    to: client.address.clone(),
+            };
+            let packet = UdpPacket::SourceAudio(SourceAudioPacket {
+                sequence_number: audio.sequence_number,
+                data: audio.data.clone(),
+                source_id: speaker.source_id,
+                source_state: speaker.source_state,
+                distance: distance_short,
+            });
+            if let Ok(data) = self.codec.encode(&packet, listener.secret, timestamp) {
+                outgoing.push(Outgoing {
+                    to: listener.address.clone(),
                     data,
                 });
             }
         }
-        out
+
+        // `SelfActivationHelper.sendAudioInfo`: the payload is only echoed back when its
+        // size changed, which on this path never happens.
+        let self_info = UdpPacket::SelfAudioInfo(SelfAudioInfoPacket {
+            source_id: speaker.source_id,
+            sequence_number: audio.sequence_number,
+            data: None,
+            distance: distance_short,
+        });
+        if let Ok(data) = self.codec.encode(&self_info, speaker.secret, timestamp) {
+            outgoing.push(Outgoing {
+                to: speaker.address.clone(),
+                data,
+            });
+        }
+
+        (outgoing, Vec::new())
     }
+}
+
+/// `VoiceServerProximitySource.getListeners`' spatial test.
+///
+/// Upstream reads both positions live from the Minecraft server and requires the same
+/// world and a squared 3-D distance within the radius. This server only *knows* what the
+/// host told it, so an unknown position or world means "cannot verify" and the listener is
+/// skipped: refusing to relay is recoverable, relaying audio across a world boundary is
+/// not.
+#[must_use]
+fn within_proximity(speaker: &RegisteredPlayer, listener: &RegisteredPlayer, radius: i32) -> bool {
+    if speaker.world.is_none() || listener.world.is_none() || speaker.world != listener.world {
+        return false;
+    }
+    let (Some(from), Some(to)) = (speaker.position, listener.position) else {
+        return false;
+    };
+    let dx = from.0 - to.0;
+    let dy = from.1 - to.1;
+    let dz = from.2 - to.2;
+    let squared = dx.mul_add(dx, dy.mul_add(dy, dz * dz));
+    let radius = f64::from(radius);
+    squared <= radius * radius
 }
 
 #[cfg(test)]
@@ -512,14 +1036,104 @@ mod tests {
         let client = server.client_by_secret(&secret).expect("connection");
         assert_eq!(client.address, "10.0.0.1:5000");
         let player_id = server.player_for_secret(&secret).expect("registered");
-        assert_eq!(
-            client.player_id.as_deref(),
-            Some(player_id.to_string().as_str())
-        );
+        assert_eq!(client.player_id, Some(player_id));
         assert_eq!(
             server.client_by_address("10.0.0.1:5000").map(|c| c.secret),
             Some(secret)
         );
+        // The connection's source id is the player's, minted at registration, so a
+        // listener told about this source before a reconnect still recognises it.
+        assert_eq!(client.source_id, server.source_id_of(&player_id).unwrap());
+        assert_eq!(client.source_state, 1, "state starts at 1");
+    }
+
+    #[test]
+    fn the_first_datagram_of_a_session_only_registers_the_connection() {
+        let mut server = VoiceServer::new(SERVER_SECRET);
+        let secret = register(&mut server, 0xa11ce);
+
+        // Upstream's `channelRead0` creates the connection and sends the burst; the
+        // packet body is handled by `handlePacket`, which that branch never reaches.
+        // So even *audio* in a session's first datagram is never relayed.
+        let activation = server.config().activations()[0].id;
+        let audio = PlayerAudioPacket {
+            sequence_number: 1,
+            data: vec![1, 2, 3],
+            activation_id: activation,
+            distance: 16,
+            stereo: false,
+        };
+        let wire = codec()
+            .encode(&UdpPacket::PlayerAudio(audio), secret, 0)
+            .expect("encode");
+        let handled = server.handle_datagram("1.1.1.1:10", &wire);
+
+        assert!(handled.outgoing.is_empty(), "nothing is relayed or echoed");
+        assert_eq!(server.connection_count(), 1, "but the connection exists");
+        assert_eq!(handled.control.len(), 3, "config, player list and update");
+        assert_eq!(server.dropped(), 0, "this was not dropped, it was handled");
+
+        // The next datagram with the same secret *is* handled normally.
+        let handled = server.handle_datagram("1.1.1.1:10", &wire);
+        assert!(
+            handled.control.is_empty(),
+            "the burst happens once per connection"
+        );
+    }
+
+    #[test]
+    fn the_registration_burst_is_config_then_player_list_then_update() {
+        use plasmo_voice_core::TcpPacket;
+
+        let mut server = VoiceServer::new(SERVER_SECRET);
+        let secret = register(&mut server, 0xa11ce);
+        let wire = codec().encode(&empty_ping(), secret, 1).expect("encode");
+        let handled = server.handle_datagram("1.1.1.1:10", &wire);
+
+        let ids: Vec<u8> = handled
+            .control
+            .iter()
+            .map(|message| *message.payload.first().expect("every payload has an id"))
+            .collect();
+        // ConfigPacket 3, PlayerListPacket 7, PlayerInfoUpdatePacket 8.
+        assert_eq!(ids, vec![3, 7, 8]);
+
+        // The first two are unicast to the joiner; the update is a broadcast, because
+        // upstream flips `connected` before sending it and everyone hears about it.
+        assert_eq!(handled.control[0].to, Some(Uuid::from_u128(0xa11ce)));
+        assert_eq!(handled.control[1].to, Some(Uuid::from_u128(0xa11ce)));
+        assert_eq!(handled.control[2].to, None);
+
+        let codec = plasmo_voice_core::TcpCodec::new();
+        let decoded = codec
+            .decode(&handled.control[0].payload, PacketDirection::Client)
+            .expect("decode ok")
+            .expect("packet");
+        match decoded {
+            TcpPacket::Config(config) => {
+                assert_eq!(config.server_id, SERVER_SECRET);
+                assert_eq!(config.activations.len(), 1);
+                assert_eq!(config.activations[0].name, "proximity");
+                assert_eq!(config.source_lines[0].name, "proximity");
+                assert!(config.player_icon_config.is_some());
+                assert!(config.encryption.is_none());
+            }
+            other => panic!("expected config, got {other:?}"),
+        }
+
+        // The player list contains the joiner itself: its connection already exists.
+        let decoded = codec
+            .decode(&handled.control[1].payload, PacketDirection::Client)
+            .expect("decode ok")
+            .expect("packet");
+        match decoded {
+            TcpPacket::PlayerList(list) => {
+                assert_eq!(list.players.len(), 1);
+                assert_eq!(list.players[0].player_id, Uuid::from_u128(0xa11ce));
+                assert_eq!(list.players[0].player_nick, "player-a11ce");
+            }
+            other => panic!("expected player list, got {other:?}"),
+        }
     }
 
     #[test]
@@ -566,12 +1180,17 @@ mod tests {
     fn audio_from_an_unregistered_sender_is_never_relayed() {
         let mut server = VoiceServer::new(SERVER_SECRET);
         let bob_secret = register(&mut server, 0xb0b);
-        server.add_connection(bob_secret, "2.2.2.2:20".to_string(), Some("bob".into()));
+        server.add_connection(
+            bob_secret,
+            "2.2.2.2:20".to_string(),
+            Some(Uuid::from_u128(0xb0b)),
+        );
 
+        let activation = server.config().activations()[0].id;
         let audio = PlayerAudioPacket {
             sequence_number: 1,
             data: vec![1],
-            activation_id: Uuid::from_u128(5),
+            activation_id: activation,
             distance: 16,
             stereo: false,
         };
@@ -584,6 +1203,7 @@ mod tests {
             handled.outgoing.is_empty(),
             "a stranger's audio must never reach a connected client"
         );
+        assert!(handled.control.is_empty());
         assert_eq!(server.dropped(), 1);
     }
 
@@ -592,7 +1212,7 @@ mod tests {
         let mut server = VoiceServer::new(SERVER_SECRET);
         let player = Uuid::from_u128(0xa11ce);
         let secret = server.register_player(player, Some("alice".into()));
-        server.add_connection(secret, "1.1.1.1:10".to_string(), Some(player.to_string()));
+        server.add_connection(secret, "1.1.1.1:10".to_string(), Some(player));
 
         assert_eq!(server.unregister_player(&player), Some(secret));
         assert_eq!(server.connection_count(), 0);
@@ -644,10 +1264,11 @@ mod tests {
         // Upstream's `sentKeepAlive` starts unset, so the first sweep pings at
         // once — and that first ping is what makes a real client "connected".
         let first = server.keep_alive(now, KEEP_ALIVE_TIMEOUT_MS);
-        assert_eq!(first.len(), 1);
-        assert_eq!(first[0].to, "1.1.1.1:10");
+        assert_eq!(first.outgoing.len(), 1);
+        assert_eq!(first.outgoing[0].to, "1.1.1.1:10");
+        assert!(first.control.is_empty());
         match codec()
-            .decode(&first[0].data, PacketDirection::Server)
+            .decode(&first.outgoing[0].data, PacketDirection::Server)
             .expect("decode ok")
             .expect("packet")
         {
@@ -661,7 +1282,7 @@ mod tests {
         // upstream's `NettyUdpServerConnection.sendPacket`.
         assert_eq!(
             codec()
-                .decode_header(&first[0].data)
+                .decode_header(&first.outgoing[0].data)
                 .expect("header")
                 .expect("envelope")
                 .secret,
@@ -669,19 +1290,22 @@ mod tests {
         );
 
         // Not again inside the jittered interval...
-        assert!(
-            server
-                .keep_alive(now + 10, KEEP_ALIVE_TIMEOUT_MS)
-                .is_empty()
-        );
+        let second = server.keep_alive(now + 10, KEEP_ALIVE_TIMEOUT_MS);
+        assert!(second.outgoing.is_empty() && second.control.is_empty());
 
-        // ...but a connection silent past the timeout is retired.
-        assert!(
-            server
-                .keep_alive(now + KEEP_ALIVE_TIMEOUT_MS + 1, KEEP_ALIVE_TIMEOUT_MS)
-                .is_empty()
-        );
+        // ...but a connection silent past the timeout is retired, and its departure is
+        // broadcast over the control plane while the registration survives.
+        let expired = server.keep_alive(now + KEEP_ALIVE_TIMEOUT_MS + 1, KEEP_ALIVE_TIMEOUT_MS);
+        assert!(expired.outgoing.is_empty());
+        assert_eq!(expired.control.len(), 1, "a PlayerDisconnect broadcast");
+        assert_eq!(expired.control[0].to, None);
+        assert_eq!(expired.control[0].payload[0], 9, "PlayerDisconnectPacket");
         assert_eq!(server.connection_count(), 0);
+        assert_eq!(
+            server.registered_player_count(),
+            1,
+            "the secret is sticky: only the connection died"
+        );
     }
 
     #[test]
@@ -725,25 +1349,16 @@ mod tests {
     #[test]
     fn connections_are_unique_per_secret_and_address() {
         let mut server = VoiceServer::new(SERVER_SECRET);
-        server.add_connection(
-            CLIENT_SECRET,
-            "1.2.3.4:10".to_string(),
-            Some("alice".into()),
-        );
+        let alice = Uuid::from_u128(0xa11ce);
+        server.add_connection(CLIENT_SECRET, "1.2.3.4:10".to_string(), Some(alice));
         assert_eq!(server.connection_count(), 1);
         assert_eq!(
-            server
-                .client_by_secret(&CLIENT_SECRET)
-                .map(|c| c.player_id.as_deref()),
-            Some(Some("alice"))
+            server.client_by_secret(&CLIENT_SECRET).map(|c| c.player_id),
+            Some(Some(alice))
         );
 
         // Re-adding the same secret from a new address moves it.
-        server.add_connection(
-            CLIENT_SECRET,
-            "1.2.3.4:11".to_string(),
-            Some("alice".into()),
-        );
+        server.add_connection(CLIENT_SECRET, "1.2.3.4:11".to_string(), Some(alice));
         assert_eq!(server.connection_count(), 1);
         assert!(server.client_by_address("1.2.3.4:10").is_none());
         assert!(server.client_by_address("1.2.3.4:11").is_some());
@@ -763,58 +1378,347 @@ mod tests {
         assert!(server.remove_connection(&other).is_none());
     }
 
-    #[test]
-    fn player_audio_is_relayed_to_other_clients_under_their_own_secret() {
-        let mut server = VoiceServer::new(SERVER_SECRET);
-        // The control plane registers both players and their first datagrams
-        // create the UDP connections — the full path a running server takes.
-        let alice_secret = register(&mut server, 0xa11ce);
-        let bob_secret = register(&mut server, 0xb0b);
-        let alice_ping = codec()
-            .encode(&empty_ping(), alice_secret, 1)
-            .expect("encode");
-        server.handle_datagram("1.1.1.1:10", &alice_ping);
-        let bob_ping = codec()
-            .encode(&empty_ping(), bob_secret, 1)
-            .expect("encode");
-        server.handle_datagram("2.2.2.2:20", &bob_ping);
-        assert_eq!(server.connection_count(), 2);
+    /// Registers a player, opens its UDP connection with a ping, and places it.
+    ///
+    /// Returns the secret. The ping is what a real client sends first, so the tests walk
+    /// the same path the running server does.
+    fn connect(
+        server: &mut VoiceServer,
+        player: u128,
+        address: &str,
+        world: &str,
+        position: (f64, f64, f64),
+    ) -> Uuid {
+        let secret = register(server, player);
+        let ping = codec().encode(&empty_ping(), secret, 1).expect("encode");
+        server.handle_datagram(address, &ping);
+        server.set_position(&Uuid::from_u128(player), Some(world.to_string()), position);
+        secret
+    }
 
-        let audio = PlayerAudioPacket {
-            sequence_number: 7,
-            data: vec![1, 2, 3, 4],
-            activation_id: Uuid::from_u128(0x5),
+    /// Builds a `PlayerAudioPacket` for the server's own proximity activation.
+    fn voice_packet(server: &VoiceServer, sequence_number: i64, data: Vec<u8>) -> UdpPacket {
+        UdpPacket::PlayerAudio(PlayerAudioPacket {
+            sequence_number,
+            data,
+            activation_id: server.config().activations()[0].id,
             distance: 16,
             stereo: false,
-        };
-        let wire = codec()
-            .encode(&UdpPacket::PlayerAudio(audio.clone()), alice_secret, 0)
-            .expect("encode");
+        })
+    }
 
+    #[test]
+    fn player_audio_becomes_source_audio_for_listeners_in_range() {
+        let mut server = VoiceServer::new(SERVER_SECRET);
+        let alice = Uuid::from_u128(0xa11ce);
+        let alice_secret = connect(&mut server, 0xa11ce, "1.1.1.1:10", "world", (0.0, 0.0, 0.0));
+        let bob_secret = connect(&mut server, 0xb0b, "2.2.2.2:20", "world", (10.0, 0.0, 0.0));
+
+        let wire = codec()
+            .encode(&voice_packet(&server, 7, vec![1, 2, 3, 4]), alice_secret, 0)
+            .expect("encode");
         let handled = server.handle_datagram("1.1.1.1:10", &wire);
-        assert_eq!(handled.outgoing.len(), 1, "only bob should receive it");
-        assert_eq!(handled.outgoing[0].to, "2.2.2.2:20");
-        // The relayed frame is addressed to *bob's* secret: alice's must not
-        // match, or every client would have to guess the sender's key.
+
+        assert_eq!(
+            handled.outgoing.len(),
+            2,
+            "one listener plus the speaker's own info"
+        );
+        let to_bob = handled
+            .outgoing
+            .iter()
+            .find(|datagram| datagram.to == "2.2.2.2:20")
+            .expect("bob hears alice");
+        let to_alice = handled
+            .outgoing
+            .iter()
+            .find(|datagram| datagram.to == "1.1.1.1:10")
+            .expect("alice is told about her own stream");
+
+        // The listener's frame is addressed to *its* secret: alice's must not match.
         assert_eq!(
             codec()
-                .decode_header(&handled.outgoing[0].data)
+                .decode_header(&to_bob.data)
                 .expect("header")
                 .expect("envelope")
                 .secret,
             bob_secret
         );
-        // PlayerAudio is the SERVER direction id (upstream 0x02), because the
-        // server is the one relaying it onward to other clients.
-        let decoded = codec()
-            .decode(&handled.outgoing[0].data, PacketDirection::Server)
+        // `SourceAudioPacket` is a CLIENT-direction id (upstream 0x03); a client that
+        // receives it decodes it as such.
+        match codec()
+            .decode(&to_bob.data, PacketDirection::Client)
             .expect("decode")
-            .expect("packet");
-        assert_eq!(decoded, UdpPacket::PlayerAudio(audio));
+            .expect("packet")
+        {
+            UdpPacket::SourceAudio(source) => {
+                assert_eq!(source.sequence_number, 7, "the sequence is passed through");
+                assert_eq!(
+                    source.data,
+                    vec![1, 2, 3, 4],
+                    "the payload is not re-encoded"
+                );
+                assert_eq!(
+                    source.source_id,
+                    server.source_id_of(&alice).expect("alice has a source"),
+                    "the listener keys audio by the speaker's source id, not a secret"
+                );
+                assert_eq!(source.source_state, 1, "the source state travels with it");
+                assert_eq!(source.distance, 16, "a distance the activation allows");
+            }
+            other => panic!("expected source audio, got {other:?}"),
+        }
+
+        // The speaker gets `SelfAudioInfoPacket` — no payload echo, because the size did
+        // not change.
+        match codec()
+            .decode(&to_alice.data, PacketDirection::Client)
+            .expect("decode")
+            .expect("packet")
+        {
+            UdpPacket::SelfAudioInfo(info) => {
+                assert_eq!(info.source_id, server.source_id_of(&alice).unwrap());
+                assert_eq!(info.sequence_number, 7);
+                assert!(info.data.is_none(), "the payload is never echoed back");
+                assert_eq!(info.distance, 16);
+            }
+            other => panic!("expected self audio info, got {other:?}"),
+        }
     }
 
     #[test]
-    fn server_direction_ids_are_not_accepted_inbound() {
+    fn audio_is_only_relayed_inside_the_activation_radius() {
+        let mut server = VoiceServer::new(SERVER_SECRET);
+        let alice_secret = connect(&mut server, 0xa11ce, "1.1.1.1:10", "world", (0.0, 0.0, 0.0));
+        // 16 blocks is the default distance, so upstream's radius is
+        // `min(16 + 16, 16 * 2) == 32`.
+        connect(&mut server, 0xb0b, "2.2.2.2:20", "world", (31.0, 0.0, 0.0));
+        connect(&mut server, 0xc0c, "3.3.3.3:30", "world", (40.0, 0.0, 0.0));
+
+        let wire = codec()
+            .encode(&voice_packet(&server, 1, vec![0]), alice_secret, 0)
+            .expect("encode");
+        let handled = server.handle_datagram("1.1.1.1:10", &wire);
+
+        let recipients: Vec<&str> = handled
+            .outgoing
+            .iter()
+            .map(|datagram| datagram.to.as_str())
+            .collect();
+        assert!(recipients.contains(&"2.2.2.2:20"), "31 blocks is inside 32");
+        assert!(
+            !recipients.contains(&"3.3.3.3:30"),
+            "40 blocks is outside the radius"
+        );
+    }
+
+    #[test]
+    fn audio_never_crosses_a_world_boundary() {
+        let mut server = VoiceServer::new(SERVER_SECRET);
+        let alice_secret = connect(
+            &mut server,
+            0xa11ce,
+            "1.1.1.1:10",
+            "overworld",
+            (0.0, 0.0, 0.0),
+        );
+        connect(&mut server, 0xb0b, "2.2.2.2:20", "nether", (0.0, 0.0, 0.0));
+
+        let wire = codec()
+            .encode(&voice_packet(&server, 1, vec![0]), alice_secret, 0)
+            .expect("encode");
+        let handled = server.handle_datagram("1.1.1.1:10", &wire);
+        assert!(
+            handled
+                .outgoing
+                .iter()
+                .all(|datagram| datagram.to != "2.2.2.2:20"),
+            "the same coordinates in another world are not in range"
+        );
+    }
+
+    #[test]
+    fn a_player_without_a_known_position_is_never_a_listener() {
+        let mut server = VoiceServer::new(SERVER_SECRET);
+        let alice_secret = connect(&mut server, 0xa11ce, "1.1.1.1:10", "world", (0.0, 0.0, 0.0));
+        // Bob is connected but the host has not told us where he is.
+        register(&mut server, 0xb0b);
+        let ping = codec()
+            .encode(
+                &empty_ping(),
+                server.secret_for_player(&Uuid::from_u128(0xb0b)).unwrap(),
+                1,
+            )
+            .expect("encode");
+        server.handle_datagram("2.2.2.2:20", &ping);
+
+        let wire = codec()
+            .encode(&voice_packet(&server, 1, vec![0]), alice_secret, 0)
+            .expect("encode");
+        let handled = server.handle_datagram("1.1.1.1:10", &wire);
+        assert!(
+            handled
+                .outgoing
+                .iter()
+                .all(|datagram| datagram.to != "2.2.2.2:20"),
+            "an unknown position means 'cannot verify', so no relay"
+        );
+    }
+
+    #[test]
+    fn an_activation_this_server_does_not_offer_is_never_relayed() {
+        let mut server = VoiceServer::new(SERVER_SECRET);
+        let alice_secret = connect(&mut server, 0xa11ce, "1.1.1.1:10", "world", (0.0, 0.0, 0.0));
+        connect(&mut server, 0xb0b, "2.2.2.2:20", "world", (1.0, 0.0, 0.0));
+
+        let packet = UdpPacket::PlayerAudio(PlayerAudioPacket {
+            sequence_number: 1,
+            data: vec![0],
+            activation_id: Uuid::from_u128(0xbeef),
+            distance: 16,
+            stereo: false,
+        });
+        let wire = codec().encode(&packet, alice_secret, 0).expect("encode");
+        let handled = server.handle_datagram("1.1.1.1:10", &wire);
+        assert!(handled.outgoing.is_empty(), "unknown activation, no relay");
+    }
+
+    #[test]
+    fn a_muted_or_disabled_speaker_is_never_relayed() {
+        for (voice_disabled, microphone_muted) in [(true, false), (false, true)] {
+            let mut server = VoiceServer::new(SERVER_SECRET);
+            let alice_secret =
+                connect(&mut server, 0xa11ce, "1.1.1.1:10", "world", (0.0, 0.0, 0.0));
+            connect(&mut server, 0xb0b, "2.2.2.2:20", "world", (1.0, 0.0, 0.0));
+            assert!(server.set_player_state(
+                &Uuid::from_u128(0xa11ce),
+                voice_disabled,
+                microphone_muted
+            ));
+
+            let wire = codec()
+                .encode(&voice_packet(&server, 1, vec![0]), alice_secret, 0)
+                .expect("encode");
+            let handled = server.handle_datagram("1.1.1.1:10", &wire);
+            assert!(
+                handled.outgoing.is_empty(),
+                "a mute the client reported must be honoured by the server too"
+            );
+        }
+    }
+
+    #[test]
+    fn a_listener_with_voice_chat_off_hears_nothing() {
+        let mut server = VoiceServer::new(SERVER_SECRET);
+        let alice_secret = connect(&mut server, 0xa11ce, "1.1.1.1:10", "world", (0.0, 0.0, 0.0));
+        connect(&mut server, 0xb0b, "2.2.2.2:20", "world", (1.0, 0.0, 0.0));
+        assert!(server.set_player_state(&Uuid::from_u128(0xb0b), true, false));
+
+        let wire = codec()
+            .encode(&voice_packet(&server, 1, vec![0]), alice_secret, 0)
+            .expect("encode");
+        let handled = server.handle_datagram("1.1.1.1:10", &wire);
+        assert!(
+            handled
+                .outgoing
+                .iter()
+                .all(|datagram| datagram.to != "2.2.2.2:20"),
+            "matchFilters drops a listener whose voice chat is off"
+        );
+    }
+
+    #[test]
+    fn the_relayed_distance_is_clamped_to_one_the_activation_allows() {
+        let mut server = VoiceServer::new(SERVER_SECRET);
+        let alice_secret = connect(&mut server, 0xa11ce, "1.1.1.1:10", "world", (0.0, 0.0, 0.0));
+        connect(&mut server, 0xb0b, "2.2.2.2:20", "world", (1.0, 0.0, 0.0));
+        let activation = server.config().activations()[0].id;
+
+        // 20 is not one of [8, 16, 32], so `calculateAllowedDistance` collapses it to
+        // the activation's default.
+        let packet = UdpPacket::PlayerAudio(PlayerAudioPacket {
+            sequence_number: 1,
+            data: vec![0],
+            activation_id: activation,
+            distance: 20,
+            stereo: false,
+        });
+        let wire = codec().encode(&packet, alice_secret, 0).expect("encode");
+        let handled = server.handle_datagram("1.1.1.1:10", &wire);
+        let to_bob = handled
+            .outgoing
+            .iter()
+            .find(|datagram| datagram.to == "2.2.2.2:20")
+            .expect("bob hears alice");
+        match codec()
+            .decode(&to_bob.data, PacketDirection::Client)
+            .expect("decode")
+            .expect("packet")
+        {
+            UdpPacket::SourceAudio(source) => assert_eq!(source.distance, 16),
+            other => panic!("expected source audio, got {other:?}"),
+        }
+
+        // A distance the activation *does* allow is passed through unchanged.
+        let packet = UdpPacket::PlayerAudio(PlayerAudioPacket {
+            sequence_number: 2,
+            data: vec![0],
+            activation_id: activation,
+            distance: 32,
+            stereo: false,
+        });
+        let wire = codec().encode(&packet, alice_secret, 0).expect("encode");
+        let handled = server.handle_datagram("1.1.1.1:10", &wire);
+        let to_bob = handled
+            .outgoing
+            .iter()
+            .find(|datagram| datagram.to == "2.2.2.2:20")
+            .expect("bob hears alice");
+        match codec()
+            .decode(&to_bob.data, PacketDirection::Client)
+            .expect("decode")
+            .expect("packet")
+        {
+            UdpPacket::SourceAudio(source) => assert_eq!(source.distance, 32),
+            other => panic!("expected source audio, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_listener_can_look_up_the_source_info_of_whoever_it_hears() {
+        let mut server = VoiceServer::new(SERVER_SECRET);
+        connect(&mut server, 0xa11ce, "1.1.1.1:10", "world", (0.0, 0.0, 0.0));
+        connect(&mut server, 0xb0b, "2.2.2.2:20", "world", (1.0, 0.0, 0.0));
+        let alice = Uuid::from_u128(0xa11ce);
+
+        let source_id = server.source_id_of(&alice).expect("a source per player");
+        assert_eq!(server.player_for_source_id(&source_id), Some(alice));
+        assert_eq!(server.player_for_source_id(&Uuid::from_u128(7)), None);
+
+        // A client that hears an unknown source asks for it; the answer must let it
+        // play the audio, which means the right line, the right state and a decoder.
+        let info = server
+            .player_source_info(&alice)
+            .expect("alice is connected");
+        match info {
+            SourceInfo::Player(source) => {
+                assert_eq!(source.base.id, source_id);
+                assert_eq!(source.base.name.as_deref(), Some("player-a11ce"));
+                assert_eq!(source.base.state, 1);
+                assert_eq!(source.base.line_id, server.config().source_lines()[0].id);
+                assert_eq!(
+                    source.base.decoder_info.map(|codec| codec.name),
+                    Some("opus".to_string())
+                );
+                assert_eq!(source.player_info.player_id, alice);
+                assert_eq!(source.player_info.player_nick, "player-a11ce");
+            }
+            other => panic!("expected a player source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn source_direction_ids_are_not_accepted_inbound() {
         // SourceAudio is CLIENT-direction, i.e. the server *sends* it; a client
         // sending one must be ignored.
         let mut server = VoiceServer::new(SERVER_SECRET);

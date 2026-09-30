@@ -8,9 +8,12 @@
 //! | Module | Target | Responsibility |
 //! | --- | --- | --- |
 //! | [`state`] | any | The persisted server state (port, secret UUID, version), its file I/O, and secret generation. Plain Rust, unit-tested on the host. |
-//! | [`server`] | any | The UDP protocol semantics — packet decoding, per-connection secrets, audio fan-out. Socket-free, so it is fully unit-tested on the host. |
+//! | [`config`] | any | The `ConfigPacket` this server advertises, and the version/distance rules the client's packets are gated on. |
+//! | [`control`] | any | The control plane state machine: the join handshake, the registration burst, and every serverbound packet's reply. Returns messages to deliver; knows nothing about Pumpkin. |
+//! | [`server`] | any | The UDP protocol semantics — packet decoding, per-connection secrets, activation- and position-filtered audio fan-out. Socket-free, so it is fully unit-tested on the host. |
 //! | [`runtime`] | any | The process-global socket + protocol state, the socket bind, and the bounded per-tick pump. |
-//! | `tick` | WASI | The Pumpkin event bridge: a `ServerTickStartEvent` handler that drives the pump. |
+//! | `channel` | WASI | The `plasmo:voice` plugin-message channel: inbound `PlayerCustomPayloadEvent`, outbound `send_custom_payload`, and the join/leave/move events that feed the control plane. |
+//! | `tick` | WASI | The Pumpkin event bridge: a `ServerTickStartEvent` handler that drives the pump and delivers the control plane's outgoing messages. |
 //! | `glue` | WASI | The `Plugin` impl, `plasmo:voice/v2` IPC handling, and persistence into `context.get_data_folder()`. |
 //!
 //! ## Why the Pumpkin ABI is gated on `target_os = "wasi"`
@@ -42,9 +45,14 @@ use plasmo_voice_core::wire::ConnectionPacket;
 use plasmo_voice_core::{TcpCodec, TcpPacket};
 use uuid::Uuid;
 
+pub mod config;
+pub mod control;
 pub mod runtime;
 pub mod server;
 pub mod state;
+
+#[cfg(target_os = "wasi")]
+pub mod channel;
 
 #[cfg(target_os = "wasi")]
 pub mod tick;
@@ -224,7 +232,8 @@ mod glue {
     use crate::server::VoiceServer;
     use crate::state::VoiceServerState;
     use crate::{
-        PLUGIN_ID, PlasmoVoicePlugin, VOICE_IPC_NAMESPACE, VoiceIpc, player_connect_reply, tick,
+        PLUGIN_ID, PlasmoVoicePlugin, VOICE_IPC_NAMESPACE, VoiceIpc, channel, player_connect_reply,
+        tick,
     };
 
     impl Plugin for PlasmoVoicePlugin {
@@ -290,9 +299,15 @@ mod glue {
             // is already installed, so the very first tick finds something to pump.
             let handler_id = tick::register(&context)?;
 
+            // The control plane travels over the `plasmo:voice` plugin-message channel:
+            // the handshake, the registration burst and every reply to a client packet
+            // are written from the tick pump, and read from the payload handler.
+            let channel_handlers = channel::register(&context)?;
+
             tracing::info!(
                 port,
                 handler_id,
+                channel_handlers = ?channel_handlers,
                 enabled = persisted.enabled,
                 protocol = plasmo_voice_core::PROTOCOL_VERSION,
                 "the Plasmo Voice server is listening"

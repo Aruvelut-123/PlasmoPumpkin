@@ -98,12 +98,36 @@ fn a_whole_session_connects_relays_and_disconnects() {
     );
 
     // 2. Data plane: their first datagrams create the connections. A ping is never
-    //    answered — echoing it would make a real client ping-pong forever.
+    //    answered — echoing it would make a real client ping-pong forever — but the
+    //    connection's birth is what triggers the control-plane registration burst,
+    //    which the caller delivers over the `plasmo:voice` channel.
     let alice_ping = registration_ping(&codec, alice);
     let handled = server.handle_datagram("198.51.100.10:40000", &alice_ping);
     assert!(handled.outgoing.is_empty());
     assert!(handled.was_ping);
     assert_eq!(server.connection_count(), 1);
+    let ids: Vec<u8> = handled
+        .control
+        .iter()
+        .map(|message| message.payload[0])
+        .collect();
+    assert_eq!(
+        ids,
+        vec![3, 7, 8],
+        "config, then player list, then the player-info broadcast"
+    );
+    assert_eq!(
+        server
+            .client_by_secret(&alice)
+            .and_then(|client| client.connection_address.as_deref()),
+        Some("203.0.113.7:8830"),
+        "the ping's endpoint is recorded, but never used as a send target"
+    );
+    assert_eq!(
+        server.client_by_secret(&alice).map(|c| c.address.as_str()),
+        Some("198.51.100.10:40000"),
+        "datagrams go to the address they came from"
+    );
 
     let bob_ping = registration_ping(&codec, bob);
     server.handle_datagram("198.51.100.20:40001", &bob_ping);
@@ -119,12 +143,17 @@ fn a_whole_session_connects_relays_and_disconnects() {
     assert_eq!(server.connection_count(), 2);
     assert_eq!(server.dropped(), 1);
 
-    // 4. Audio from a connected player reaches every *other* connection, re-keyed to
-    //    that connection's secret so only its owner can read it.
+    // 4. Audio from a connected player reaches every *other* connection in range, as a
+    //    clientbound `SourceAudioPacket` re-keyed to that connection's secret so only its
+    //    owner can read it — and the speaker itself gets a `SelfAudioInfoPacket` instead.
+    //    Upstream's relay is proximity-filtered, so both players have to be placed first.
+    server.set_position(&ALICE, Some("world".to_string()), (0.0, 64.0, 0.0));
+    server.set_position(&BOB, Some("world".to_string()), (8.0, 64.0, 0.0));
+    let activation = server.config().activations()[0].id;
     let audio = PlayerAudioPacket {
         sequence_number: 7,
         data: vec![0xde, 0xad, 0xbe, 0xef],
-        activation_id: Uuid::from_u128(0x5),
+        activation_id: activation,
         distance: 16,
         stereo: false,
     };
@@ -132,26 +161,57 @@ fn a_whole_session_connects_relays_and_disconnects() {
         .encode(&UdpPacket::PlayerAudio(audio.clone()), alice, 0)
         .expect("encode");
     let handled = server.handle_datagram("198.51.100.10:40000", &frame);
-    assert_eq!(handled.outgoing.len(), 1, "only bob is listening");
-    assert_eq!(handled.outgoing[0].to, "198.51.100.20:40001");
+    assert_eq!(
+        handled.outgoing.len(),
+        2,
+        "bob hears alice, and alice is told about her own stream"
+    );
+    let to_bob = handled
+        .outgoing
+        .iter()
+        .find(|datagram| datagram.to == "198.51.100.20:40001")
+        .expect("bob is listening");
     let envelope = codec
-        .decode_header(&handled.outgoing[0].data)
+        .decode_header(&to_bob.data)
         .expect("header")
         .expect("envelope");
     assert_eq!(envelope.secret, bob, "bob's own key");
-    assert_eq!(
-        codec
-            .decode(&handled.outgoing[0].data, PacketDirection::Server)
-            .expect("decode ok")
-            .expect("packet"),
-        UdpPacket::PlayerAudio(audio.clone())
-    );
+    match codec
+        .decode(&to_bob.data, PacketDirection::Client)
+        .expect("decode ok")
+        .expect("packet")
+    {
+        UdpPacket::SourceAudio(source) => {
+            assert_eq!(source.sequence_number, 7);
+            assert_eq!(source.data, vec![0xde, 0xad, 0xbe, 0xef]);
+            assert_eq!(source.source_id, server.source_id_of(&ALICE).unwrap());
+            assert_eq!(source.distance, 16);
+        }
+        other => panic!("expected source audio, got {other:?}"),
+    }
+    let to_alice = handled
+        .outgoing
+        .iter()
+        .find(|datagram| datagram.to == "198.51.100.10:40000")
+        .expect("alice is told about her own stream");
+    match codec
+        .decode(&to_alice.data, PacketDirection::Client)
+        .expect("decode ok")
+        .expect("packet")
+    {
+        UdpPacket::SelfAudioInfo(info) => {
+            assert_eq!(info.sequence_number, 7);
+            assert!(info.data.is_none(), "the payload is never echoed back");
+        }
+        other => panic!("expected self audio info, got {other:?}"),
+    }
 
     // 5. Keep-alive keeps both connections warm: one empty ping each, addressed to
     //    the connection's own secret.
-    let pings = server.keep_alive(plasmo_voice_plugin::server::now_ms(), 15_000);
-    assert_eq!(pings.len(), 2);
-    for ping in &pings {
+    let sweep = server.keep_alive(plasmo_voice_plugin::server::now_ms(), 15_000);
+    assert_eq!(sweep.outgoing.len(), 2);
+    assert!(sweep.control.is_empty(), "nobody timed out");
+    for ping in &sweep.outgoing {
         assert!(
             matches!(
                 codec
@@ -174,13 +234,24 @@ fn a_whole_session_connects_relays_and_disconnects() {
     assert_eq!(server.connection_count(), 1, "alice cannot come back in");
     assert_eq!(server.dropped(), 2);
 
-    // Bob's audio still relays — to nobody, since he is the only one left — but it is
-    // accepted rather than dropped.
+    // Bob's audio is accepted rather than dropped, but it reaches nobody: he is the only
+    // player left, so the only datagram is his own self-info.
     let frame = codec
         .encode(&UdpPacket::PlayerAudio(audio), bob, 0)
         .expect("encode");
     let handled = server.handle_datagram("198.51.100.20:40001", &frame);
-    assert!(handled.outgoing.is_empty());
+    assert_eq!(handled.outgoing.len(), 1);
+    assert_eq!(handled.outgoing[0].to, "198.51.100.20:40001");
+    assert!(
+        matches!(
+            codec
+                .decode(&handled.outgoing[0].data, PacketDirection::Client)
+                .expect("decode ok")
+                .expect("packet"),
+            UdpPacket::SelfAudioInfo(_)
+        ),
+        "the speaker's own stream info, not a relay"
+    );
     assert_eq!(server.dropped(), 2, "bob is still a valid client");
 }
 

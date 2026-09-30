@@ -33,6 +33,7 @@
 use pumpkin_plugin_api::Server;
 use pumpkin_plugin_api::events::{EventData, EventHandler, EventPriority, ServerTickStartEvent};
 
+use crate::channel;
 use crate::runtime::with_runtime;
 
 /// Cheap, zero-sized handle handed to the host as an event handler.
@@ -41,16 +42,21 @@ use crate::runtime::with_runtime;
 pub struct TickPump;
 
 impl EventHandler<ServerTickStartEvent> for TickPump {
-    /// Drains a bounded batch of voice datagrams and answers them.
+    /// Drains a bounded batch of voice datagrams and answers them, then delivers whatever
+    /// the control plane produced over the `plasmo:voice` channel.
     ///
     /// The event data is returned unchanged: this pump observes the tick, it does
     /// not modify it. The tick number is only reported in traces.
     fn handle(
         &self,
-        _server: Server,
+        server: Server,
         event: EventData<ServerTickStartEvent>,
     ) -> EventData<ServerTickStartEvent> {
         let (received, sent) = with_runtime(|runtime| runtime.pump());
+        // The socket and the channel cannot be driven from the same borrow, so the pump
+        // queues control messages and they are written out here — inside the same tick,
+        // so a client that connects is told about it before the next one.
+        channel::flush(&server);
         if received > 0 {
             tracing::trace!(tick = event.tick, received, sent, "voice tick");
         }
