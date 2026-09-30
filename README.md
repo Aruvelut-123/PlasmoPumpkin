@@ -23,8 +23,8 @@ The project is a Cargo workspace with two crates:
 | Area | State |
 | --- | --- |
 | `plasmo-voice-core` wire format (UDP + 26 TCP packets + data models) | ✅ implemented, 39 tests |
-| `plasmo-voice-plugin` (Pumpkin component) | ✅ UDP voice server with the full control plane over `plasmo:voice` — 62 unit tests + 3 session + 2 socket tests |
-| Native tests (`cargo test --workspace`) | ✅ 106 tests passing |
+| `plasmo-voice-plugin` (Pumpkin component) | ✅ UDP voice server with the full control plane over `plasmo:voice` — 63 unit tests + 3 session + 2 socket tests |
+| Native tests (`cargo test --workspace`) | ✅ 107 tests passing |
 | `wasm32-wasip2` component build | ✅ verified: a component (layer `0x0d`) exporting all six host entry points |
 | Lint & format (`cargo fmt`, `cargo clippy -D warnings`) | ✅ clean on the host **and** on `wasm32-wasip2` |
 | CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) | ✅ four jobs: `core`, `policy`, `plugin`, `hygiene` |
