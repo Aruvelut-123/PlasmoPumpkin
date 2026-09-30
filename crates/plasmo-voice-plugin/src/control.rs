@@ -327,19 +327,22 @@ impl ControlPlane {
 
     /// `LanguageRequestPacket` — upstream answers with its translated strings.
     ///
-    /// This server ships no translation table, so it answers with the requested language
-    /// and an empty map: the client then falls back to the keys it already has, which is
-    /// strictly better than not answering (an unanswered request leaves its locale
-    /// pending).
+    /// The table comes from [`crate::language`]: the requested locale, lowercased, with
+    /// `en_us` filling anything it does not carry. The client stores it and translates its
+    /// own GUI through it, which is the only way the volume tab's source-line label can
+    /// read "Proximity" instead of `pv.activation.proximity`.
     fn on_language_request(&self, player: Uuid, request: &LanguageRequestPacket) -> Vec<Outbound> {
-        // The client asks for its own locale; we only have the English entries (see
-        // `client_language`). An empty map here is not "no translations needed" — it is
-        // what makes the client print `pv.activation.proximity` verbatim.
-        let language = crate::config::client_language();
+        // The client asks for its own locale; `language::client_language` lowercases it,
+        // falls back to `en_us` for a locale this server does not ship, and flattens the
+        // `client` scope into the `pv.*` keys the client looks up. An empty map here is not
+        // "no translations needed" — it is what makes the client print the raw
+        // `pv.activation.proximity` in the volume tab.
+        let language = crate::language::client_language(&request.language);
         tracing::info!(
             %player,
             requested = %request.language,
             entries = language.len(),
+            locales = crate::language::locales().count(),
             "the client asked for the server's translations; replying with {} entries",
             language.len()
         );
@@ -730,15 +733,46 @@ mod tests {
         match decode(&messages[0].payload) {
             TcpPacket::Language(language) => {
                 assert_eq!(language.language_name, "ru_ru");
-                // The requested locale is echoed back, but what matters is the table: the
-                // client cannot render the volume tab's source-line label without it.
+                // The requested locale is echoed back, but what matters is the table: it is
+                // answered in that locale, and it is what the volume tab's source-line
+                // label is rendered from.
+                assert_eq!(
+                    language.language,
+                    vec![(
+                        "pv.activation.proximity".to_string(),
+                        "Локальный".to_string()
+                    )],
+                    "the proximity translation is what the volume tab renders"
+                );
+            }
+            other => panic!("expected a language packet, got {other:?}"),
+        }
+    }
+
+    /// A locale this server does not ship is answered in the fallback locale, never with an
+    /// empty table — an empty table is what puts the raw `pv.activation.proximity` on the
+    /// client's screen.
+    #[test]
+    fn an_unknown_locale_is_answered_in_the_fallback_locale() {
+        let plane = ControlPlane::new(SERVER_ID);
+        let mut server = VoiceServer::new(SERVER_ID);
+
+        let payload = codec()
+            .encode(&TcpPacket::LanguageRequest(LanguageRequestPacket {
+                language: "xx_yy".to_string(),
+            }))
+            .expect("encode");
+        let messages = plane.handle(&mut server, ALICE, "Alice", "0.0.0.0", 8830, &payload);
+
+        match decode(&messages[0].payload) {
+            TcpPacket::Language(language) => {
+                assert_eq!(language.language_name, "xx_yy");
                 assert_eq!(
                     language.language,
                     vec![(
                         "pv.activation.proximity".to_string(),
                         "Proximity".to_string()
-                    )],
-                    "the proximity translation is what the volume tab renders"
+                    )]
                 );
             }
             other => panic!("expected a language packet, got {other:?}"),

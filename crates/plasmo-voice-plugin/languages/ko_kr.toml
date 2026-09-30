@@ -1,0 +1,4 @@
+# The client-scope half of plasmoapp/plasmo-voice-crowdin @ pv : ko_KR/server.toml
+# (upstream reads this in VoiceServerLanguages.getClientLanguage).
+[client.pv.activation]
+proximity = "근거리"

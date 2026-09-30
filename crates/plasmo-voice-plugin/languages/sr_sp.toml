@@ -1,0 +1,4 @@
+# The client-scope half of plasmoapp/plasmo-voice-crowdin @ pv : sr_SP/server.toml
+# (upstream reads this in VoiceServerLanguages.getClientLanguage).
+[client.pv.activation]
+proximity = "Домет"

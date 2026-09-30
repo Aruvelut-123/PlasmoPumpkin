@@ -9,6 +9,7 @@
 //! | --- | --- | --- |
 //! | [`state`] | any | The persisted server state (port, secret UUID, version), its file I/O, and secret generation. Plain Rust, unit-tested on the host. |
 //! | [`config`] | any | The `ConfigPacket` this server advertises, and the version/distance rules the client's packets are gated on. |
+//! | [`language`] | any | The translation table (`languages/list` plus one file per locale) and the locale lookup a `LanguageRequestPacket` is answered from. |
 //! | [`control`] | any | The control plane state machine: the join handshake, the registration burst, and every serverbound packet's reply. Returns messages to deliver; knows nothing about Pumpkin. |
 //! | [`server`] | any | The UDP protocol semantics — packet decoding, per-connection secrets, activation- and position-filtered audio fan-out. Socket-free, so it is fully unit-tested on the host. |
 //! | [`runtime`] | any | The process-global socket + protocol state, the socket bind, and the bounded per-tick pump. |
@@ -47,6 +48,7 @@ use uuid::Uuid;
 
 pub mod config;
 pub mod control;
+pub mod language;
 pub mod runtime;
 pub mod server;
 pub mod state;

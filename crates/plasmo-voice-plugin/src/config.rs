@@ -109,29 +109,6 @@ pub fn proximity_source_line() -> VoiceSourceLine {
     }
 }
 
-/// The client-scoped translations this server ships, as `LanguagePacket.language`.
-///
-/// The official server ships `languages/en_us.toml` and sends the client-scoped half of it
-/// on every `LanguageRequestPacket` (`PlayerChannelHandler:203-213` →
-/// `getClientLanguage(language)`). That file has exactly one `[client.*]` entry:
-///
-/// ```toml
-/// [client.pv.activation]
-/// proximity = "Proximity"
-/// ```
-///
-/// It matters more than its size suggests. The mod's own `en_us.json` does **not** define
-/// `pv.activation.proximity`, and the volume tab translates the source line's translation
-/// key (`VolumeTabWidget:125`), so a server that sends an empty map makes the client
-/// display the raw key `pv.activation.proximity` where "Proximity" belongs.
-///
-/// We ship no translations of our own, so every requested language gets the English
-/// fallback — the same text upstream falls back to for a language it does not have.
-#[must_use]
-pub fn client_language() -> Vec<(String, String)> {
-    vec![(PROXIMITY_TRANSLATION.to_string(), "Proximity".to_string())]
-}
-
 /// `voice.capture` as it goes on the wire.
 pub fn capture_info() -> CaptureInfo {
     CaptureInfo {
