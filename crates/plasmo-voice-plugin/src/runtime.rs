@@ -30,7 +30,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use uuid::Uuid;
 
-use crate::server::VoiceServer;
+use crate::server::{KEEP_ALIVE_TIMEOUT_MS, Outgoing, VoiceServer, now_ms};
 
 /// Maximum datagrams drained from the socket per tick.
 ///
@@ -56,6 +56,9 @@ pub struct VoiceRuntime {
     received: AtomicU64,
     /// Datagrams sent over the lifetime of the plugin.
     sent: AtomicU64,
+    /// How long a connection may stay silent before it is retired, mirroring
+    /// upstream's `VoiceServerConfig.keepAliveTimeoutMs`.
+    keep_alive_timeout_ms: u64,
 }
 
 impl VoiceRuntime {
@@ -68,7 +71,22 @@ impl VoiceRuntime {
             data_folder: String::new(),
             received: AtomicU64::new(0),
             sent: AtomicU64::new(0),
+            keep_alive_timeout_ms: KEEP_ALIVE_TIMEOUT_MS,
         }
+    }
+
+    /// Overrides how long a silent connection may live.
+    ///
+    /// Upstream reads this from `voice.keepAliveTimeoutMs`; the plugin keeps the
+    /// upstream default and exposes the knob so a host can tune it later.
+    pub fn set_keep_alive_timeout(&mut self, timeout_ms: u64) {
+        self.keep_alive_timeout_ms = timeout_ms;
+    }
+
+    /// How long a silent connection may live.
+    #[must_use]
+    pub fn keep_alive_timeout(&self) -> u64 {
+        self.keep_alive_timeout_ms
     }
 
     /// Installs the socket, the protocol state machine and the data folder.
@@ -138,11 +156,13 @@ impl VoiceRuntime {
         self.sent.load(Ordering::Relaxed)
     }
 
-    /// Drains up to [`MAX_DATAGRAMS_PER_TICK`] datagrams and answers them.
+    /// Drains up to [`MAX_DATAGRAMS_PER_TICK`] datagrams, answers them, and keeps
+    /// idle connections alive.
     ///
     /// Returns `(received, sent)` for this tick. A no-op when not listening, which
     /// is what makes it safe to call unconditionally from the tick pump.
     pub fn pump(&mut self) -> (u64, u64) {
+        let timeout_ms = self.keep_alive_timeout_ms;
         let (Some(socket), Some(protocol)) = (self.socket.as_ref(), self.protocol.as_mut()) else {
             return (0, 0);
         };
@@ -165,22 +185,13 @@ impl VoiceRuntime {
             received += 1;
 
             let handled = protocol.handle_datagram(&from.to_string(), &buffer[..len]);
-            for outgoing in handled.outgoing {
-                match outgoing.to.parse::<SocketAddr>() {
-                    Ok(target) => match socket.send_to(&outgoing.data, target) {
-                        Ok(_) => sent += 1,
-                        Err(error) => {
-                            // A dropped voice frame is expected under congestion and is
-                            // not worth a warning: audio tolerates loss by design.
-                            tracing::trace!(%error, peer = %outgoing.to, "voice send failed");
-                        }
-                    },
-                    Err(error) => {
-                        tracing::debug!(%error, peer = %outgoing.to, "could not parse peer address");
-                    }
-                }
-            }
+            sent += send_datagrams(socket, handled.outgoing);
         }
+
+        // Keep-alive shares the socket's clock. Pumpkin 0.2.0 puts no `on_tick` on
+        // the `Plugin` trait, so this tick *event* is the only timer the guest has
+        // — the same job upstream schedules every 100ms in `NettyUdpKeepAlive`.
+        sent += send_datagrams(socket, protocol.keep_alive(now_ms(), timeout_ms));
 
         self.received.fetch_add(received, Ordering::Relaxed);
         self.sent.fetch_add(sent, Ordering::Relaxed);
@@ -205,6 +216,30 @@ impl Default for VoiceRuntime {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Sends each datagram, returning how many left the socket.
+///
+/// Split out of [`VoiceRuntime::pump`] because both the reply path and the
+/// keep-alive sweep send through it.
+fn send_datagrams(socket: &UdpSocket, outgoing: Vec<Outgoing>) -> u64 {
+    let mut sent = 0u64;
+    for datagram in outgoing {
+        match datagram.to.parse::<SocketAddr>() {
+            Ok(target) => match socket.send_to(&datagram.data, target) {
+                Ok(_) => sent += 1,
+                Err(error) => {
+                    // A dropped voice frame is expected under congestion and is
+                    // not worth a warning: audio tolerates loss by design.
+                    tracing::trace!(%error, peer = %datagram.to, "voice send failed");
+                }
+            },
+            Err(error) => {
+                tracing::debug!(%error, peer = %datagram.to, "could not parse peer address");
+            }
+        }
+    }
+    sent
 }
 
 /// The one runtime instance.

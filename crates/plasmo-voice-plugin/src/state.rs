@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 
 use plasmo_voice_core::PROTOCOL_VERSION;
+use uuid::Uuid;
 
 /// File name inside the plugin data folder.
 pub const STATE_FILE: &str = "state.json";
@@ -163,12 +164,22 @@ impl VoiceServerState {
     /// what actually makes it stable.
     #[must_use]
     pub fn generate_secret(port: u16) -> String {
+        Self::generate_secret_uuid(u64::from(port).rotate_left(17)).to_string()
+    }
+
+    /// Mints a fresh secret UUID from the wall clock mixed with `seed`.
+    ///
+    /// Same entropy story as [`Self::generate_secret`]; the version and variant
+    /// bits are set so the value is UUID-shaped, exactly like the
+    /// `UUID.randomUUID()` upstream mints per player in `getSecretByPlayerId`.
+    #[must_use]
+    pub fn generate_secret_uuid(seed: u64) -> Uuid {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
 
         let mut bytes = [0u8; 16];
-        let mut mix = nanos as u64 ^ u64::from(port).rotate_left(17);
+        let mut mix = nanos as u64 ^ seed;
         // xorshift64*: cheap, dependency-free, and enough to spread the bits below.
         for chunk in bytes.chunks_mut(8) {
             mix ^= mix >> 12;
@@ -177,7 +188,9 @@ impl VoiceServerState {
             let value = mix.wrapping_mul(0x2545_F491_4F6C_DD1D);
             chunk.copy_from_slice(&value.to_le_bytes()[..chunk.len()]);
         }
-        Self::secret_from_bytes(&bytes)
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Uuid::from_u128(u128::from_be_bytes(bytes))
     }
 }
 

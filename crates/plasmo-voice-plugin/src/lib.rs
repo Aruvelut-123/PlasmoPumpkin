@@ -38,6 +38,10 @@
 //! Pumpkin 0.2.0 does not put an `on_tick` callback on the `Plugin` trait, so the
 //! tick *event* is the supported clock source; that choice is confined to `tick`.
 
+use plasmo_voice_core::wire::ConnectionPacket;
+use plasmo_voice_core::{TcpCodec, TcpPacket};
+use uuid::Uuid;
+
 pub mod runtime;
 pub mod server;
 pub mod state;
@@ -78,15 +82,42 @@ pub enum VoiceIpc {
     Handshake,
     /// `status` — report the running server's counters.
     Status,
+    /// `player-connect\nplayer=<uuid>\n[name=<name>]\n[ip=<public ip>]` — the
+    /// Minecraft side announces that a player joined and wants voice.
+    ///
+    /// This is the plugin's control plane, the job upstream gives to the
+    /// Minecraft plugin-message channel: `VoiceUdpServerConnectionManager
+    /// .getSecretByPlayerId` mints the player's secret and answers with a
+    /// clientbound `ConnectionPacket(secret, ip, port)`. Nothing else can create a
+    /// UDP connection — an unregistered secret is dropped on sight.
+    PlayerConnect {
+        /// The raw `player=` value; the handler validates it as a UUID so the error
+        /// can name the offending value.
+        player: String,
+        /// The optional `name=` value, for logs and the status reply.
+        name: Option<String>,
+        /// The optional `ip=` value: where clients should reach this server.
+        /// Upstream reads it from the config; a Pumpkin plugin has no public
+        /// address of its own, so the caller supplies it.
+        ip: Option<String>,
+    },
+    /// `player-disconnect\nplayer=<uuid>` — the player left; forget its secret and
+    /// drop its socket.
+    PlayerDisconnect {
+        /// The raw `player=` value; the handler validates it as a UUID.
+        player: String,
+    },
     /// Anything else, echoed back as unsupported.
     Unknown(String),
 }
 
 impl VoiceIpc {
-    /// Parses an IPC payload: `plasmo:voice/v2\n<command>`.
+    /// Parses an IPC payload: `plasmo:voice/v2\n<command>[\n<key>=<value>]…`.
     ///
     /// Returns `None` when the payload is not addressed to this namespace, which
     /// lets the caller stay silent rather than erroring on foreign traffic.
+    /// Otherwise the command is tokenised, not validated: an argument typo
+    /// becomes an actionable error in the handler instead of silence here.
     #[must_use]
     pub fn parse(message: &[u8]) -> Option<Self> {
         let text = std::str::from_utf8(message).ok()?;
@@ -94,12 +125,90 @@ impl VoiceIpc {
         if namespace != VOICE_IPC_NAMESPACE {
             return None;
         }
-        Some(match rest.trim() {
+
+        let mut lines = rest.trim().lines();
+        let command = lines.next()?.trim();
+        // Unknown keys are ignored on purpose, so a newer caller can send extra
+        // fields without breaking an older build.
+        let args: Vec<(&str, &str)> = lines
+            .filter_map(|line| line.split_once('='))
+            .map(|(key, value)| (key.trim(), value.trim()))
+            .collect();
+        let argument = |key: &str| {
+            args.iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| *value)
+        };
+        let text_argument = |key: &str| {
+            argument(key)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        };
+
+        Some(match command {
             "handshake" => Self::Handshake,
             "status" => Self::Status,
+            "player-connect" => Self::PlayerConnect {
+                player: argument("player").unwrap_or_default().to_string(),
+                name: text_argument("name"),
+                ip: text_argument("ip"),
+            },
+            "player-disconnect" => Self::PlayerDisconnect {
+                player: argument("player").unwrap_or_default().to_string(),
+            },
             other => Self::Unknown(other.to_string()),
         })
     }
+}
+
+/// Lower-case hex, so an IPC reply can carry opaque bytes on one text line.
+#[must_use]
+pub fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    bytes.iter().fold(String::new(), |mut out, byte| {
+        // Writing into a `String` cannot fail.
+        let _ = write!(out, "{byte:02x}");
+        out
+    })
+}
+
+/// Builds the `player-connect` reply: the control-plane answer a Minecraft-side
+/// plugin forwards to the client.
+///
+/// Upstream hands the client `new ConnectionPacket(secret, ip, port)`
+/// (`VoiceUdpServerConnectionManager.connect`), whose secret is the one minted for
+/// that player. The packet is returned already encoded so the caller only has to
+/// forward bytes; `ip` must come from the caller, because a Pumpkin plugin has no
+/// public address of its own. With no `ip` there is no honest endpoint to
+/// advertise, so the packet is reported as `none` rather than pointing every client
+/// at `0.0.0.0`.
+///
+/// # Errors
+///
+/// Fails only when the core codec cannot encode the packet, which would be a bug.
+pub fn player_connect_reply(
+    player_id: Uuid,
+    secret: Uuid,
+    port: u16,
+    ip: Option<&str>,
+) -> Result<String, String> {
+    let packet = match ip {
+        Some(ip) => hex_encode(
+            &TcpCodec::new()
+                .encode(&TcpPacket::Connection(ConnectionPacket {
+                    secret,
+                    ip: ip.to_string(),
+                    port: i32::from(port),
+                }))
+                .map_err(|error| format!("could not encode ConnectionPacket: {error}"))?,
+        ),
+        None => "none".to_string(),
+    };
+
+    Ok(format!(
+        "{VOICE_IPC_NAMESPACE}\nplayer-connect\nplayer={player_id}\nsecret={secret}\nport={port}\npacket={packet}"
+    ))
 }
 
 /// The Pumpkin ABI surface: everything that needs `pumpkin-plugin-api`.
@@ -114,7 +223,9 @@ mod glue {
     use crate::runtime::{VoiceRuntime, bind, with_runtime};
     use crate::server::VoiceServer;
     use crate::state::VoiceServerState;
-    use crate::{PLUGIN_ID, PlasmoVoicePlugin, VOICE_IPC_NAMESPACE, VoiceIpc, tick};
+    use crate::{
+        PLUGIN_ID, PlasmoVoicePlugin, VOICE_IPC_NAMESPACE, VoiceIpc, player_connect_reply, tick,
+    };
 
     impl Plugin for PlasmoVoicePlugin {
         fn new() -> Self {
@@ -260,13 +371,61 @@ mod glue {
                     }
                     VoiceIpc::Status => {
                         let dropped = runtime.protocol().map_or(0, VoiceServer::dropped);
+                        let players = runtime
+                            .protocol()
+                            .map_or(0, VoiceServer::registered_player_count);
                         Ok(format!(
-                            "{VOICE_IPC_NAMESPACE}\nstatus\nlistening={}\nconnections={}\nreceived={}\nsent={}\ndropped={}",
+                            "{VOICE_IPC_NAMESPACE}\nstatus\nlistening={}\nplayers={}\nconnections={}\nreceived={}\nsent={}\ndropped={}",
                             runtime.is_listening(),
+                            players,
                             runtime.connection_count(),
                             runtime.received(),
                             runtime.sent(),
                             dropped
+                        ))
+                    }
+                    // The control plane's "a player joined": mint the secret that
+                    // player's client will speak with, and hand back the exact
+                    // clientbound `ConnectionPacket` upstream would send, already
+                    // encoded, so the caller only has to forward bytes.
+                    VoiceIpc::PlayerConnect { player, name, ip } => {
+                        let player_id = Uuid::parse_str(&player)
+                            .map_err(|error| format!("player={player:?} is not a UUID: {error}"))?;
+                        let port = runtime
+                            .port()
+                            .ok_or_else(|| "the voice server is not listening yet".to_string())?;
+
+                        let protocol = runtime
+                            .protocol_mut()
+                            .ok_or_else(|| "the voice server is not running".to_string())?;
+                        let secret = protocol.register_player(player_id, name);
+
+                        tracing::info!(
+                            %player_id,
+                            %secret,
+                            port,
+                            endpoint = ip.as_deref().unwrap_or("unspecified"),
+                            "registered a voice player"
+                        );
+
+                        player_connect_reply(player_id, secret, port, ip.as_deref())
+                    }
+                    VoiceIpc::PlayerDisconnect { player } => {
+                        let player_id = Uuid::parse_str(&player)
+                            .map_err(|error| format!("player={player:?} is not a UUID: {error}"))?;
+
+                        let removed = runtime
+                            .protocol_mut()
+                            .and_then(|protocol| protocol.unregister_player(&player_id));
+                        let secret = removed.map_or_else(String::new, |secret| secret.to_string());
+                        let players = runtime
+                            .protocol()
+                            .map_or(0, VoiceServer::registered_player_count);
+
+                        tracing::info!(%player_id, forgotten = removed.is_some(), "voice player left");
+
+                        Ok(format!(
+                            "{VOICE_IPC_NAMESPACE}\nplayer-disconnect\nplayer={player_id}\nsecret={secret}\nplayers={players}"
                         ))
                     }
                     VoiceIpc::Unknown(command) => Err(format!(
@@ -284,6 +443,7 @@ mod glue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use plasmo_voice_core::PacketDirection;
 
     #[test]
     fn parses_the_handshake_and_status_commands() {
@@ -294,6 +454,39 @@ mod tests {
         assert_eq!(
             VoiceIpc::parse(b"plasmo:voice/v2\nstatus"),
             Some(VoiceIpc::Status)
+        );
+    }
+
+    #[test]
+    fn parses_a_player_connect_with_its_arguments() {
+        assert_eq!(
+            VoiceIpc::parse(
+                b"plasmo:voice/v2\nplayer-connect\nplayer=1f8f0d3a-1c2b-4d5e-8f90-1234567890ab\nname=Alice\nip=203.0.113.7"
+            ),
+            Some(VoiceIpc::PlayerConnect {
+                player: "1f8f0d3a-1c2b-4d5e-8f90-1234567890ab".to_string(),
+                name: Some("Alice".to_string()),
+                ip: Some("203.0.113.7".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn player_arguments_are_optional_and_unknown_keys_are_ignored() {
+        // The handler validates the UUID, so parsing must not swallow the value.
+        assert_eq!(
+            VoiceIpc::parse(b"plasmo:voice/v2\nplayer-connect\nplayer=\ncolour=red"),
+            Some(VoiceIpc::PlayerConnect {
+                player: String::new(),
+                name: None,
+                ip: None,
+            })
+        );
+        assert_eq!(
+            VoiceIpc::parse(b"plasmo:voice/v2\nplayer-disconnect\nplayer=abc\nfuture=1"),
+            Some(VoiceIpc::PlayerDisconnect {
+                player: "abc".to_string()
+            })
         );
     }
 
@@ -328,5 +521,61 @@ mod tests {
     #[test]
     fn invalid_utf8_is_ignored_instead_of_panicking() {
         assert_eq!(VoiceIpc::parse(&[0xff, 0xfe, 0x00]), None);
+    }
+
+    /// Decodes the `packet=` line of a reply back into a `TcpPacket`.
+    fn decode_reply_packet(reply: &str) -> TcpPacket {
+        let hex = reply
+            .lines()
+            .find_map(|line| line.strip_prefix("packet="))
+            .expect("a packet= line");
+        assert_ne!(hex, "none", "the reply carries no encoded packet");
+
+        let bytes: Vec<u8> = (0..hex.len() / 2)
+            .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).expect("hex"))
+            .collect();
+        TcpCodec::new()
+            .decode(&bytes, PacketDirection::Client)
+            .expect("decode ok")
+            .expect("a packet")
+    }
+
+    #[test]
+    fn player_connect_reply_carries_an_encoded_connection_packet() {
+        let player_id = Uuid::from_u128(0xa11ce);
+        let secret = Uuid::from_u128(0x005e_c5e7);
+        let reply =
+            player_connect_reply(player_id, secret, 8830, Some("203.0.113.7")).expect("reply");
+
+        assert!(reply.starts_with("plasmo:voice/v2\nplayer-connect\n"));
+        assert!(reply.contains(&format!("player={player_id}")));
+        assert!(reply.contains(&format!("secret={secret}")));
+        assert!(reply.contains("port=8830"));
+
+        // The bytes are the clientbound `ConnectionPacket` upstream sends, so a
+        // caller can forward them without knowing the wire format.
+        match decode_reply_packet(&reply) {
+            TcpPacket::Connection(packet) => {
+                assert_eq!(packet.secret, secret);
+                assert_eq!(packet.ip, "203.0.113.7");
+                assert_eq!(packet.port, 8830);
+            }
+            other => panic!("expected a connection packet, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn player_connect_reply_without_an_ip_has_no_packet() {
+        // No public address means no honest endpoint: the caller gets the secret
+        // and the port, and is told to build the packet itself.
+        let reply =
+            player_connect_reply(Uuid::from_u128(1), Uuid::from_u128(2), 1, None).expect("reply");
+        assert!(reply.ends_with("packet=none"), "{reply}");
+    }
+
+    #[test]
+    fn hex_encoding_is_lower_case_and_byte_wise() {
+        assert_eq!(hex_encode(&[0x00, 0x0f, 0xff]), "000fff");
+        assert_eq!(hex_encode(&[]), "");
     }
 }
