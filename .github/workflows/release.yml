@@ -7,6 +7,11 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Refresh the notes of this existing tag instead (no asset upload)"
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -79,31 +84,54 @@ jobs:
       # The changelog is built from the commit history, not written by hand.
       #
       # GitHub's own `generate_release_notes` is not used: it lists *merged pull
-      # requests*, and this repository lands commits directly on `main`, so it
-      # would produce nothing but a compare link. The subjects are conventional
-      # commits (AGENTS.md §8), which is what makes the grouping below work — so
-      # the subject is the changelog line, and it is published verbatim.
+      # requests*, and this repository lands commits directly on `main`, so all it
+      # ever produced was a bare "Full Changelog" link. The subjects are
+      # conventional commits (AGENTS.md §8), which is what makes the grouping below
+      # work — so the subject *is* the changelog line, and it is published verbatim.
       - name: Generate changelog
+        env:
+          # Set only by a manual dispatch: refresh the notes of an existing tag
+          # instead of cutting a new release. Passed through the environment rather
+          # than interpolated into the script.
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
 
+          target_is_tag=1
           if [ "${GITHUB_REF_TYPE:-branch}" = "tag" ]; then
+            # A tag push: the release being cut.
             target="${GITHUB_REF_NAME}"
+          elif [ -n "${INPUT_TAG}" ]; then
+            # Manual notes refresh for a tag that already exists.
+            target="${INPUT_TAG}"
+            if ! git rev-parse --verify --quiet "refs/tags/${target}" >/dev/null; then
+              echo "::error title=Unknown tag::${target} is not a tag in this repository"
+              exit 1
+            fi
+          else
+            # Manual dry run: the branch head, everything since the newest tag.
+            target="$(git rev-parse --short HEAD)"
+            target_is_tag=0
+          fi
+
+          if [ "$target_is_tag" = 1 ]; then
             prev="$(git describe --tags --abbrev=0 --match 'v*' "${target}^" 2>/dev/null || true)"
           else
-            # Manual dry run: everything since the newest version tag.
-            target="$(git rev-parse --short HEAD)"
             prev="$(git describe --tags --abbrev=0 --match 'v*' HEAD 2>/dev/null || true)"
           fi
 
           if [ -n "$prev" ]; then
             range="${prev}..${target}"
-            compare="**Full changelog:** https://github.com/${GITHUB_REPOSITORY}/compare/${prev}...${GITHUB_REF_NAME}"
+            compare="**Full changelog:** https://github.com/${GITHUB_REPOSITORY}/compare/${prev}...${target}"
           else
-            # First release: no previous tag to compare against, so list the
-            # whole history reachable from the tag instead of nothing.
+            # First release: there is no previous tag to compare against, so list
+            # the whole history reachable from the tag rather than nothing.
             range="${target}"
-            compare=""
+            if [ "$target_is_tag" = 1 ]; then
+              compare="**Full changelog:** https://github.com/${GITHUB_REPOSITORY}/commits/${target}"
+            else
+              compare=""
+            fi
           fi
           echo "collecting commits from: ${range}"
 
@@ -185,4 +213,14 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/plasmo-voice.wasm
+          body_path: dist/CHANGELOG.md
+
+      # Manual notes refresh for a tag that already exists. The body is replaced
+      # and nothing is uploaded: this run checked out the branch, not the tag, so
+      # its component is not the one that tag released.
+      - name: Refresh release notes
+        if: ${{ !startsWith(github.ref, 'refs/tags/') && inputs.tag != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
           body_path: dist/CHANGELOG.md
