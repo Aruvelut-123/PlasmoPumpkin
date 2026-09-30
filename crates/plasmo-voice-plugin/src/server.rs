@@ -174,7 +174,17 @@ impl VoiceServer {
     ///
     /// Mirrors `addConnection`: the secret is authoritative and the player id is
     /// the one the control plane registered for that secret.
-    pub fn add_connection(&mut self, secret: Uuid, address: String, player_id: Option<String>) {
+    ///
+    /// Deliberately **crate-private**: [`VoiceServer::handle_datagram`] is the only
+    /// production caller, and it only reaches this point after the secret matched the
+    /// control-plane registry. Exposing it is how the connection table would end up
+    /// trusting a secret that nobody registered.
+    pub(crate) fn add_connection(
+        &mut self,
+        secret: Uuid,
+        address: String,
+        player_id: Option<String>,
+    ) {
         // One connection per secret and per address, like upstream's maps.
         //
         // The same secret may reconnect from a *new* address (a player changing
@@ -208,7 +218,10 @@ impl VoiceServer {
     }
 
     /// Removes a connection, returning it if it existed.
-    pub fn remove_connection(&mut self, secret: &Uuid) -> Option<Client> {
+    ///
+    /// Crate-private for the same reason as [`VoiceServer::add_connection`]: the
+    /// callers are the disconnect path and the keep-alive sweep.
+    pub(crate) fn remove_connection(&mut self, secret: &Uuid) -> Option<Client> {
         let client = self.by_secret.remove(secret)?;
         self.by_address.remove(&client.address);
         Some(client)
