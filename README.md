@@ -113,8 +113,8 @@ The two directions of `PingPacket` are not symmetric, and getting that wrong is 
   answers it.** A real client replies to *any* inbound ping with another ping, so echoing
   pings back would produce an unbounded ping-pong between server and client.
 * **The server sends its own keep-alive pings** — an empty `PingPacket` (a timestamp and
-  nothing else), immediately for a new connection and then every 2.5–4 s (1.5 s plus up to
-  1.5 s of jitter derived from the secret). That first ping is what makes a real client
+  nothing else), immediately for a new connection and then every 1.5–3 s (a 1.5 s base plus
+  up to 1.5 s of jitter derived from the secret). That first ping is what makes a real client
   consider itself connected; without a ping at all it goes soft-dead at **7 s** (it stops
   recording) and tears the connection down at **30 s**.
 * The endpoint a client puts in its ping (`serverIp` / `serverPort`) is recorded

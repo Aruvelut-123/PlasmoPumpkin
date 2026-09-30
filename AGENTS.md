@@ -223,7 +223,7 @@ fixing the disagreement is part of your change.
      `handlePacket` sits in the branch that datagram does not take.
    * the server **never answers a ping** — a real client answers *any* inbound ping with
      another ping, so echoing pings back ping-pongs without bound. The server sends its own
-     keep-alive pings instead (immediately, then every 2.5–4 s); a client goes soft-dead
+     keep-alive pings instead (immediately, then every 1.5–3 s); a client goes soft-dead
      after 7 s without one and drops the connection at 30 s.
    * a client that changes UDP address is *followed* (`setRemoteAddress`), not duplicated.
    * a ping's `serverIp` / `serverPort` is **informational** (`connectionAddress`); the send
