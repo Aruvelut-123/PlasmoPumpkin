@@ -53,10 +53,17 @@ Plasmo Voice uses **two transports**:
   | Id | Name | Direction | Body |
   | --- | --- | --- | --- |
   | `0x01` | `Ping` | ANY | optional server IP (UTF) + port (u16) |
-  | `0x02` | `PlayerAudio` | CLIENT | source id, sequence number, audio frame bytes |
+  | `0x02` | `PlayerAudio` | SERVER | source id, sequence number, audio frame bytes |
   | `0x03` | `SourceAudio` | CLIENT | source id, sequence number, audio frame bytes |
   | `0x04` | `SelfAudioInfo` | CLIENT | activation id, distance, stereo flag |
   | `0x100` | `Custom` | ANY | addon-defined payload (truncates to `0x00` on the wire) |
+
+  `Direction` uses upstream's `PacketDirection` naming, which is easy to misread:
+  **`CLIENT` means the *client receives* it** (clientbound, server → client) and
+  **`SERVER` means the *client sends* it** (serverbound, client → server). Checked
+  against the upstream packages: `PlayerAudioPacket` lives in `udp.serverbound`, while
+  `SourceAudioPacket` and `SelfAudioInfoPacket` live in `udp.clientbound`. This is why the
+  server decodes every inbound datagram with `PacketDirection::Server`.
 
 * **TCP** — the control plane (26 packets, ids `0x01`–`0x1a`), used for handshake,
   config, player/source state, activations and source lines.
