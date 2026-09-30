@@ -12,3 +12,7 @@
 *.swp
 .DS_Store
 Thumbs.db
+
+# Protocol-recon scratch: captured dumps, probe logs and decompiled upstream
+# sources used while porting the UDP protocol. Local-only working material.
+.recon/
