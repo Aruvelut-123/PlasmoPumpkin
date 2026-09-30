@@ -23,37 +23,70 @@ The project is a Cargo workspace with two crates:
 | Area | State |
 | --- | --- |
 | `plasmo-voice-core` wire format (UDP + 26 TCP packets + data models) | ✅ implemented, 39 tests |
-| `plasmo-voice-plugin` (Pumpkin component) | 🚧 UDP voice server, `plasmo:voice/v2` IPC handshake, state persistence — 21 tests, but not yet functional end to end (see below) |
-| Native tests (`cargo test --workspace`) | ✅ 60 tests passing |
+| `plasmo-voice-plugin` (Pumpkin component) | ✅ UDP voice server with a working control plane — 34 unit tests + 3 end-to-end session tests |
+| Native tests (`cargo test --workspace`) | ✅ 76 tests passing |
 | `wasm32-wasip2` component build | ✅ verified: a component (layer `0x0d`) exporting all six host entry points |
 | Lint & format (`cargo fmt`, `cargo clippy -D warnings`) | ✅ clean on the host **and** on `wasm32-wasip2` |
 | CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) | ✅ four jobs: `core`, `policy`, `plugin`, `hygiene` |
 
-### Known gap: nothing registers a connection yet
+### How a player gets connected (the control plane)
 
-`VoiceServer` answers pings, tracks connections by secret **and** address, and fans
-`PlayerAudio` out to every other connection — all covered by tests. But in a running server
-the connection table stays empty, because **`add_connection` is only ever called from
-tests**. The consequences are concrete: the `status` IPC reply always reports
-`connections=0`, and `relay()` iterates an empty map, so no audio is ever forwarded. The
-component is currently a reachability (ping) endpoint, not a working voice relay.
+Upstream Plasmo Voice has **no TCP listener**: the 26 "TCP" packets travel over the
+Minecraft plugin-message channel (`ServerChannelHandler` decodes them from plugin-message
+bytes with `PacketDirection.SERVER`), and only UDP is a real socket. A player's session is
+established like this:
 
-Upstream fills that table from the Minecraft-side control plane: the voice server mints a
-per-player secret (`VoiceUdpServerConnectionManager.getSecretByPlayerId`), ships it to the
-client in the clientbound `ConnectionPacket` over TCP, and `addConnection` runs when a
-datagram arrives bearing a secret it already knows. This plugin has no equivalent source of
-"which secrets belong to real players" yet, so closing the gap is a design decision:
-extend the `plasmo:voice/v2` IPC with connect/disconnect messages, or serve the TCP control
-plane in-guest.
+1. the server mints a secret for the player — `VoiceUdpServerConnectionManager
+   .getSecretByPlayerId` is the only place `secretByPlayerId` / `playerIdBySecret` are
+   filled (`UUID.randomUUID()` per session, in memory);
+2. it sends the client a clientbound `ConnectionPacket(secret, ip, port)` over the control
+   plane, telling it where the UDP socket lives and which secret to speak with;
+3. the client pings over UDP until it hears back; on the **first datagram whose secret is
+   known**, `NettyPacketHandler` creates the UDP connection (`addConnection`) and answers
+   with the config / player-list burst;
+4. any datagram whose secret is *not* known is dropped without a reply.
+
+This plugin reproduces that model with **IPC as the control plane**, because that is what a
+Pumpkin plugin has instead of the Minecraft channel. `plasmo:voice/v2` therefore has four
+commands:
+
+| Message | Reply |
+| --- | --- |
+| `plasmo:voice/v2\nhandshake` | `port=…`, `secret=…` (the server-wide secret), `listening=…` |
+| `plasmo:voice/v2\nstatus` | `listening`, `players`, `connections`, `received`, `sent`, `dropped` |
+| `plasmo:voice/v2\nplayer-connect\nplayer=<uuid>\n[name=<name>]\n[ip=<public ip>]` | `player`, `secret` (this player's), `port`, and `packet=<hex>` |
+| `plasmo:voice/v2\nplayer-disconnect\nplayer=<uuid>` | `player`, `secret` (forgotten), `players` |
+
+`packet=<hex>` is the encoded clientbound `ConnectionPacket`, ready to forward to that
+player's client verbatim; it is `packet=none` when no `ip=` was supplied, because a plugin
+has no public address of its own to advertise and inventing `0.0.0.0` would point every
+client at nothing. **Nothing else can create a connection** — an unregistered secret is
+dropped on sight, so a public UDP port never relays a stranger's audio.
+
+### Ping and keep-alive semantics
+
+The two directions of `PingPacket` are not symmetric, and getting that wrong is a real bug:
+
+* **A client's ping is a registration request / keep-alive ack, and the server never
+  answers it.** A real client replies to *any* inbound ping with another ping, so echoing
+  pings back would produce an unbounded ping-pong between server and client.
+* **The server sends its own keep-alive pings** — an empty `PingPacket` (a timestamp and
+  nothing else) at most once per second per connection, with 1.5–3 s of jitter derived from
+  the secret. That first ping is also what makes a real client consider itself connected.
+* A connection that has sent nothing for `keepAliveTimeoutMs` (upstream default **15 s**) is
+  retired.
+
+Both are driven from the one clock the guest has: the Pumpkin tick event (see
+[`crates/plasmo-voice-plugin/src/runtime.rs`](crates/plasmo-voice-plugin/src/runtime.rs)),
+since Pumpkin 0.2.0 puts no `on_tick` on the `Plugin` trait.
 
 ---
 
 ## Protocol summary
 
-Plasmo Voice uses **two transports**:
-
-* **UDP** — the audio data plane, and the only path a voice server actually needs to
-  serve. Every datagram is prefixed by a fixed header:
+Plasmo Voice has **one transport** — UDP, the audio data plane and the only path a voice
+server actually needs to serve — plus a control plane that upstream tunnels through the
+Minecraft plugin-message channel. Every UDP datagram is prefixed by a fixed header:
 
   ```
   offset  size  field
@@ -82,8 +115,12 @@ Plasmo Voice uses **two transports**:
   `SourceAudioPacket` and `SelfAudioInfoPacket` live in `udp.clientbound`. This is why the
   server decodes every inbound datagram with `PacketDirection::Server`.
 
-* **TCP** — the control plane (26 packets, ids `0x01`–`0x1a`), used for handshake,
-  config, player/source state, activations and source lines.
+**The control plane** (26 packets, ids `0x01`–`0x1a`) covers handshake, config,
+player/source state, activations and source lines. Upstream carries them over the
+**Minecraft plugin-message channel**, not a socket: `PacketTcpCodec` is decoded from
+plugin-message bytes on both sides, which is why the voice server has no TCP listener. This
+plugin carries the same packets over IPC (see
+[How a player gets connected](#how-a-player-gets-connected-the-control-plane)).
 
 ### Encoding rules (why this is not plain "Rust default")
 
@@ -230,11 +267,13 @@ crates/
       error.rs                   VoiceError
   plasmo-voice-plugin/           the server (wasm32-wasip2 component)
     src/
-      lib.rs                     crate docs, IPC parser, the WASI-gated `glue` module
-      server.rs                  UDP voice server: pings, connections, audio fan-out
+      lib.rs                     crate docs, IPC parser + reply builder, the WASI-gated `glue` module
+      server.rs                  UDP voice server: player registry, auth, audio fan-out, keep-alive
       runtime.rs                 process-global socket + protocol state, pumped once per tick
       state.rs                   secret UUID and persisted state in the plugin data folder
       tick.rs                    `ServerTickStartEvent` bridge (WASI only)
+    tests/
+      lifecycle.rs               end-to-end sessions: control message → encoded packet → relayed audio
 .github/workflows/ci.yml         the canonical build/lint/test definition
 .recon/                          reconnaissance: wire dumps, pinned-API snapshots (not built)
 ```

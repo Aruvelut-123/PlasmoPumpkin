@@ -192,24 +192,31 @@ fixing the disagreement is part of your change.
 
 ## 10. Current work queue
 
-1. **`plasmo-voice-plugin` is implemented, but not yet functional end to end.** The
-   `Plugin` impl, the `plasmo:voice/v2` `handshake`/`status` IPC handler, the in-guest UDP
-   server (`network.udp.bind`) and persistence into `context.get_data_folder()` are all in
-   place, and `server.rs` answers pings, tracks connections by secret **and** address, and
-   fans `PlayerAudio` out to every other connection. `SourceAudio`/`SelfAudioInfo` are
-   client-direction ids and are dropped inbound. All of that is pinned by tests.
+1. **`plasmo-voice-plugin` is functional end to end.** The `Plugin` impl, the
+   `plasmo:voice/v2` IPC control plane, the in-guest UDP server (`network.udp.bind`), the
+   keep-alive/timeout sweep and persistence into `context.get_data_folder()` are all in
+   place. `server.rs` owns the protocol logic: a player registry mirroring upstream's
+   `secretByPlayerId` / `playerIdBySecret`, a per-secret/per-address connection table, audio
+   fan-out, and the `NettyUdpKeepAlive` behaviour.
 
-   **The gap:** only tests call `add_connection`, so a running server's connection table
-   stays empty — `connections=0`, and `PlayerAudio` is never relayed to anyone. Upstream
-   fills that table from the MC-side control plane
-   (`VoiceUdpServerConnectionManager.getSecretByPlayerId` creates a player's secret, and the
-   UDP connection is added once a datagram arrives for a known secret); this plugin has no
-   equivalent source of "which secrets are real players" yet. Closing the gap means either
-   extending the `plasmo:voice/v2` IPC with connect/disconnect messages, or serving the TCP
-   control plane in-guest.
-2. Add integration tests that drive `UdpCodec`/`TcpCodec` across the full client lifecycle
-   (connect over TCP → ping/bind over UDP → audio fan-out → disconnect). Today the codecs
-   are covered by per-packet round-trips and the server logic by `server.rs` unit tests;
-   nothing yet exercises a whole session end to end.
+   **The control plane is IPC**, because upstream's control plane is the Minecraft
+   plugin-message channel and IPC is what a Pumpkin plugin has instead. `player-connect`
+   mints a player's secret and replies with the encoded clientbound `ConnectionPacket`; the
+   UDP connection is created by that player's first datagram, exactly as
+   `NettyPacketHandler` does it. **An unregistered secret is dropped without a reply** —
+   never relax that to "register anyone who pings", or a public UDP port becomes an open
+   audio relay.
+
+   Two invariants in `server.rs` that look like bugs if you do not know the upstream:
+   * the server **never answers a ping** — a real client answers *any* inbound ping with
+     another ping, so echoing pings back ping-pongs without bound. The server sends its own
+     keep-alive pings instead, and that first ping is what makes a client "connected".
+   * a client that changes UDP address is *followed* (`setRemoteAddress`), not duplicated.
+2. Integration coverage lives in `crates/plasmo-voice-plugin/tests/lifecycle.rs`, which
+   drives whole sessions through the public API: control message → minted secret → decoded
+   `ConnectionPacket` → UDP registration → audio fan-out → keep-alive → disconnect. Keep
+   the WASI-only glue thin so this stays possible: anything host-testable (for example
+   `player_connect_reply`, the reply builder) belongs in `lib.rs` **outside** the `cfg`
+   gate.
 3. **Keep this file and `README.md` in sync with reality.** If a claim in either document
    is wrong, fixing it is part of your change.
