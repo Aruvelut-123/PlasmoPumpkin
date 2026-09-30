@@ -144,6 +144,12 @@ impl ControlPlane {
             }
             TcpPacket::LanguageRequest(request) => self.on_language_request(player, &request),
             other => {
+                // Everything left in the SERVER direction is a packet this server
+                // deliberately does not answer. `decode` already dropped unknown ids and
+                // ids registered for the other direction, so the only way to land here is
+                // a *new* serverbound packet that somebody added to `plasmo-voice-core`
+                // without wiring it up. Reaching this arm in a test is therefore a
+                // finding, not a no-op.
                 tracing::debug!(
                     %player,
                     id = other.id(),
@@ -714,6 +720,105 @@ mod tests {
         let after_timeout = plane.disconnected(ALICE);
         assert_eq!(after_timeout.len(), 1);
         assert_eq!(id_of(&after_timeout[0].payload), 9);
+    }
+
+    #[test]
+    fn every_serverbound_packet_has_an_arm() {
+        // The registry is the only place that knows the full SERVER-direction set: exactly
+        // six ids, and `ControlPlane::handle` must have an arm for each. A new serverbound
+        // packet added to the core crate fails here until it is classified — that is the
+        // point, because the `other` arm in `handle` is otherwise silent.
+        const HANDLED: [u8; 6] = [
+            0x05, // LanguageRequest
+            0x0A, // PlayerInfo
+            0x0B, // PlayerState
+            0x0C, // PlayerAudioEnd
+            0x0D, // PlayerActivationDistances
+            0x0F, // SourceInfoRequest
+        ];
+
+        let tcp = codec();
+        let registry = tcp.registry();
+        let mut serverbound: Vec<u8> = (0u16..=0xFF)
+            .map(|id| id as u8)
+            .filter(|id| {
+                registry
+                    .tcp_by_type(u32::from(*id), PacketDirection::Server)
+                    .is_some()
+            })
+            .collect();
+        serverbound.sort_unstable();
+
+        let mut expected = HANDLED.to_vec();
+        expected.sort_unstable();
+        assert_eq!(
+            serverbound, expected,
+            "the serverbound id set changed; add an arm in `ControlPlane::handle` and \
+             update this list"
+        );
+
+        // Every one of them reaches a real arm: none of these six calls may be answered
+        // with nothing, except the two that are legitimately silent.
+        let plane = ControlPlane::new(SERVER_ID);
+        let mut server = VoiceServer::new(SERVER_ID);
+        connect(&mut server, ALICE, "1.1.1.1:10");
+
+        assert_eq!(
+            plane
+                .handle(
+                    &mut server,
+                    ALICE,
+                    "Alice",
+                    "0.0.0.0",
+                    8830,
+                    &player_info("2.1.7")
+                )
+                .len(),
+            1,
+            "0x0A PlayerInfo is the handshake"
+        );
+        let state = codec()
+            .encode(&TcpPacket::PlayerState(PlayerStatePacket {
+                voice_disabled: true,
+                microphone_muted: false,
+            }))
+            .expect("encode");
+        assert_eq!(
+            plane
+                .handle(&mut server, ALICE, "Alice", "0.0.0.0", 8830, &state)
+                .len(),
+            1,
+            "0x0B PlayerState broadcasts the change"
+        );
+        let language = codec()
+            .encode(&TcpPacket::LanguageRequest(LanguageRequestPacket {
+                language: "en_us".to_string(),
+            }))
+            .expect("encode");
+        assert_eq!(
+            plane
+                .handle(&mut server, ALICE, "Alice", "0.0.0.0", 8830, &language)
+                .len(),
+            1,
+            "0x05 LanguageRequest is answered"
+        );
+        let distances = codec()
+            .encode(&TcpPacket::PlayerActivationDistances(
+                PlayerActivationDistancesPacket {
+                    distance_by_activation_id: Vec::new(),
+                },
+            ))
+            .expect("encode");
+        assert!(
+            plane
+                .handle(&mut server, ALICE, "Alice", "0.0.0.0", 8830, &distances)
+                .is_empty(),
+            "0x0D PlayerActivationDistances is recorded, never answered"
+        );
+
+        // The other two are exercised by the dedicated tests above; assert here only that
+        // their ids are the ones this test classifies.
+        assert!(HANDLED.contains(&0x0C) && HANDLED.contains(&0x0F));
     }
 
     #[test]
