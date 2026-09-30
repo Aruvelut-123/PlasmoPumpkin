@@ -175,6 +175,10 @@ jobs:
           print(f"verified: component-model layer 0x{layer:04x}")
           PY
 
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-tools
+
       - name: Verify the plugin exports the host entry points
         run: |
           set -euo pipefail
