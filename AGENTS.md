@@ -220,6 +220,11 @@ fixing the disagreement is part of your change.
    * The handshake starts on **`PlayerJoinEvent`**. The client never announces the channel
      — it only answers `PlayerInfoRequestPacket` — so a channel-registration trigger can
      wait forever. `ChannelRegisterHandler` is a secondary trigger, not the primary one.
+   * `LanguagePacket` (id 6) is **not cosmetic**. The volume tab labels the proximity source
+     line with `translatable(sourceLine.getTranslation())` = `pv.activation.proximity`, and
+     the mod's own `lang/en_us.json` does not define that key, so an empty translation map
+     makes the client render the raw key. Ship the one entry upstream ships
+     (`client_language()` in `config.rs`); do not "simplify" it back to an empty vector.
 
    The `plasmo:voice/v2` IPC namespace remains as an optional *programmatic* front door
    (there are still tests that drive it); it is no longer how a real client connects.

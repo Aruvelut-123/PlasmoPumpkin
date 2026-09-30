@@ -332,9 +332,20 @@ impl ControlPlane {
     /// strictly better than not answering (an unanswered request leaves its locale
     /// pending).
     fn on_language_request(&self, player: Uuid, request: &LanguageRequestPacket) -> Vec<Outbound> {
+        // The client asks for its own locale; we only have the English entries (see
+        // `client_language`). An empty map here is not "no translations needed" — it is
+        // what makes the client print `pv.activation.proximity` verbatim.
+        let language = crate::config::client_language();
+        tracing::info!(
+            %player,
+            requested = %request.language,
+            entries = language.len(),
+            "the client asked for the server's translations; replying with {} entries",
+            language.len()
+        );
         let packet = TcpPacket::Language(LanguagePacket {
             language_name: request.language.clone(),
-            language: Vec::new(),
+            language,
         });
         vec![Outbound::to_player(player, self.encode(&packet))]
     }
@@ -719,9 +730,15 @@ mod tests {
         match decode(&messages[0].payload) {
             TcpPacket::Language(language) => {
                 assert_eq!(language.language_name, "ru_ru");
-                assert!(
-                    language.language.is_empty(),
-                    "no translation table ships with this plugin"
+                // The requested locale is echoed back, but what matters is the table: the
+                // client cannot render the volume tab's source-line label without it.
+                assert_eq!(
+                    language.language,
+                    vec![(
+                        "pv.activation.proximity".to_string(),
+                        "Proximity".to_string()
+                    )],
+                    "the proximity translation is what the volume tab renders"
                 );
             }
             other => panic!("expected a language packet, got {other:?}"),

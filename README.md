@@ -159,9 +159,10 @@ parity. In rough order of importance:
   Upstream does not do this either, but its clients do.
 * **Decoration packets are not sent.** `ConfigPlayerInfoPacket` (id 4),
   `DistanceVisualizePacket` (14), `AnimatedActionBarPacket` (23) and the addon/entity/static
-  source variants are unimplemented; `LanguagePacket` (id 6) answers with the requested
-  locale and an *empty* translation table, so the client falls back to its own keys.
-  `CustomPacket` (UDP `0x100`) is decoded but not routed to any addon.
+  source variants are unimplemented. `LanguagePacket` (id 6) answers with the requested
+  locale and the one key the volume tab renders (`pv.activation.proximity` → "Proximity");
+  everything else falls back to the client's own keys. `CustomPacket` (UDP `0x100`) is
+  decoded but not routed to any addon.
 
 ---
 
@@ -400,6 +401,29 @@ this sequence:
 
 The client's *first* UDP datagram only registers the connection; the registration burst
 (`ConfigPacket` → `PlayerListPacket` → `PlayerInfoUpdatePacket`) is the answer to it.
+
+### The translation table, and why an empty one looks like a bug
+
+`LanguagePacket` (id 6) is not cosmetic. The volume tab labels the proximity source line
+with `McTextComponent.translatable(sourceLine.getTranslation())`
+(`VolumeTabWidget`), and that translation is `pv.activation.proximity` — a key the mod's
+own `client/.../lang/en_us.json` does **not** define. Only the server can supply it, so a
+server that answers `LanguageRequestPacket` with an empty map makes the client print the
+raw key `pv.activation.proximity` where "Proximity" belongs. Upstream ships
+`languages/en_us.toml`, whose only `[client.*]` entry is:
+
+```toml
+[client.pv.activation]
+proximity = "Proximity"
+```
+
+This server ships that one entry for every requested locale (it has no translations of its
+own, so English is the honest fallback), from `client_language()` in
+[`config.rs`](crates/plasmo-voice-plugin/src/config.rs). The client asks for it as soon as
+it has processed the `ConfigPacket` (`ModServerConnection`, right after
+`ServerInfoInitializedEvent`), so the reply is logged at info and the map is pinned by
+`a_language_request_is_answered_with_the_requested_locale` in
+[`control.rs`](crates/plasmo-voice-plugin/src/control.rs).
 
 ---
 
