@@ -1,0 +1,31 @@
+# Dependabot configuration for the Cargo workspace.
+#
+# The workspace root owns every `[workspace.dependencies]` entry, so a single
+# directory at the repo root covers all crates:
+#
+#   - `plasmo-voice-core`:  protocol core, no external deps
+#   - `plasmo-voice-plugin`: protocol + WASM plugin
+#                             (rsa / uuid / tracing / rand_core,
+#                              plus the tag-pinned git dependency on Pumpkin)
+version: 2
+
+updates:
+  # All Cargo.toml files in the workspace. The tag-pinned git dependency
+  # (`pumpkin-plugin-api`, tag `0.2.0+26.3-26.51`) is a git reference, not a
+  # crates.io version, so dependabot proposes tag bumps for it; everything
+  # else is updated on the normal weekly schedule.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+    # Group compatible bumps so a routine patch update does not open five
+    # separate PRs.
+    groups:
+      minimum-bumps:
+        update-types:
+          - "minor"
+          - "patch"
+    commit-message:
+      prefix: "deps"
