@@ -104,8 +104,9 @@ line's name.
 The connect → config → relay path works end to end, but this is not full upstream parity:
 
 * Only the **proximity** activation and source line exist; there is no config file.
-* **Permissions and `canSee`/vanish are not enforced**, and there is no server-side mute
-  manager.
+* **Vanish is honored**: a periodic `canSee` sweep (once a second) mirrors the host's
+  hide/show state into the relay, and a vanished pair goes silent in **both** directions.
+  Server-side permissions and a mute manager are still missing.
 * **Positions come from move events**, not live world reads.
 * **Decoration packets** (`ConfigPlayerInfo`, `DistanceVisualize`, `AnimatedActionBar`, the
   addon/entity/static source variants) are not sent.

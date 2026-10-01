@@ -6,7 +6,7 @@
 //! synthetic datagrams — so the interesting logic is covered on the host target
 //! even though the real server runs on `wasm32-wasip2`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use plasmo_voice_core::data::{
     CodecInfo, PlayerSourceInfo, SelfSourceInfo, SourceInfo, SourceInfoBase, VoicePlayerInfo,
@@ -201,6 +201,13 @@ pub struct VoiceServer {
     registered: HashMap<Uuid, RegisteredPlayer>,
     /// secret -> player id (upstream `playerIdBySecret`).
     player_by_secret: HashMap<Uuid, Uuid>,
+    /// (viewer, target) pairs where `viewer` cannot see `target` on the host.
+    ///
+    /// Synced from the tick pump: the host owns the truth (its `hidePlayer` /
+    /// `showPlayer` state), so the guest mirrors `canSee` on a schedule. The
+    /// relay mutes a pair in **both** directions — a vanished player is fully
+    /// gone from the voice world, not just inaudible.
+    hidden_players: HashSet<(Uuid, Uuid)>,
     /// Folded into minted secrets so two players registered in the same
     /// millisecond cannot collide.
     secret_counter: u64,
@@ -240,6 +247,7 @@ impl VoiceServer {
             by_address: HashMap::new(),
             registered: HashMap::new(),
             player_by_secret: HashMap::new(),
+            hidden_players: HashSet::new(),
             secret_counter: 0,
             server_secret,
             aes_key,
@@ -555,10 +563,37 @@ impl VoiceServer {
         players
     }
 
+    /// Every registered player id, sorted — the cheap enumeration the vanish
+    /// sync needs before it asks the host who can see whom.
+    #[must_use]
+    pub fn registered_player_ids(&self) -> Vec<Uuid> {
+        let mut ids: Vec<Uuid> = self.registered.keys().copied().collect();
+        ids.sort();
+        ids
+    }
+
     /// One registration, if the player is known.
     #[must_use]
     pub fn registered_player(&self, player_id: &Uuid) -> Option<&RegisteredPlayer> {
         self.registered.get(player_id)
+    }
+
+    /// Replaces the whole vanish table in one go.
+    ///
+    /// The tick pump rebuilds this from the host's `canSee` on a schedule, so an
+    /// *incremental* API would only have to handle storms of diffs. A pair
+    /// `(viewer, target)` means the host keeps `viewer` from seeing `target`.
+    pub fn set_hidden_players(&mut self, hidden: HashSet<(Uuid, Uuid)>) {
+        self.hidden_players = hidden;
+    }
+
+    /// Whether `speaker` and `listener` are silent to each other because either
+    /// one is vanished from the other's world (bidirectional, per the chosen
+    /// vanish semantics).
+    #[must_use]
+    fn voice_muted_by_vanish(&self, speaker: &Uuid, listener: &Uuid) -> bool {
+        self.hidden_players.contains(&(*speaker, *listener))
+            || self.hidden_players.contains(&(*listener, *speaker))
     }
 
     /// Players with a **live UDP connection**, which is upstream's `hasVoiceChat()`.
@@ -802,6 +837,7 @@ impl VoiceServer {
             .values()
             .filter(|candidate| candidate.player_id != *speaker)
             .filter(|candidate| !candidate.voice_disabled)
+            .filter(|candidate| !self.voice_muted_by_vanish(speaker, &candidate.player_id))
             .filter(|candidate| within_proximity(source, candidate, radius))
             .map(|candidate| candidate.player_id)
             .collect();
@@ -1931,5 +1967,76 @@ mod tests {
         assert!(handled.outgoing.is_empty());
         assert_eq!(server.connection_count(), 1, "the secret was accepted");
         assert_eq!(server.dropped(), 1);
+    }
+
+    #[test]
+    fn vanish_mutes_a_pair_in_both_directions() {
+        let mut server = server();
+        let alice_id = Uuid::from_u128(0xa11ce);
+        let bob_id = Uuid::from_u128(0xb0b);
+        connect(&mut server, 0xa11ce, "1.1.1.1:10", "world", (0.0, 0.0, 0.0));
+        connect(&mut server, 0xb0b, "2.2.2.2:20", "world", (1.0, 0.0, 0.0));
+        let activation = server.config().activations()[0].id;
+
+        // Baseline: each hears the other.
+        assert_eq!(
+            server.proximity_listener_ids(&alice_id, activation, 16),
+            vec![bob_id]
+        );
+        assert_eq!(
+            server.proximity_listener_ids(&bob_id, activation, 16),
+            vec![alice_id]
+        );
+
+        // Alice vanishes from Bob's world (`hide_player(alice, bob)` upstream):
+        // the pair goes silent in both directions, the chosen vanish semantics.
+        server.set_hidden_players(HashSet::from([(alice_id, bob_id)]));
+        assert!(
+            server
+                .proximity_listener_ids(&alice_id, activation, 16)
+                .is_empty()
+        );
+        assert!(
+            server
+                .proximity_listener_ids(&bob_id, activation, 16)
+                .is_empty()
+        );
+
+        // The mirror direction behaves identically.
+        server.set_hidden_players(HashSet::from([(bob_id, alice_id)]));
+        assert!(
+            server
+                .proximity_listener_ids(&alice_id, activation, 16)
+                .is_empty()
+        );
+        assert!(
+            server
+                .proximity_listener_ids(&bob_id, activation, 16)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn vanish_only_mutes_the_vanished_pair() {
+        let mut server = server();
+        let alice_id = Uuid::from_u128(0xa11ce);
+        let bob_id = Uuid::from_u128(0xb0b);
+        let carol_id = Uuid::from_u128(0xca20);
+        connect(&mut server, 0xa11ce, "1.1.1.1:10", "world", (0.0, 0.0, 0.0));
+        connect(&mut server, 0xb0b, "2.2.2.2:20", "world", (1.0, 0.0, 0.0));
+        connect(&mut server, 0xca20, "3.3.3.3:30", "world", (0.0, 0.0, 1.0));
+        let activation = server.config().activations()[0].id;
+
+        server.set_hidden_players(HashSet::from([(alice_id, bob_id)]));
+
+        // Carol hears both Alice and Bob; Alice and Bob both hear Carol.
+        let alice_hear = server.proximity_listener_ids(&alice_id, activation, 16);
+        let bob_hear = server.proximity_listener_ids(&bob_id, activation, 16);
+        assert!(alice_hear.contains(&carol_id) && !alice_hear.contains(&bob_id));
+        assert!(bob_hear.contains(&carol_id) && !bob_hear.contains(&alice_id));
+        assert_eq!(
+            server.proximity_listener_ids(&carol_id, activation, 16),
+            vec![bob_id, alice_id]
+        );
     }
 }

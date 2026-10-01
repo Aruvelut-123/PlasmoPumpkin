@@ -313,8 +313,11 @@ fixing the disagreement is part of your change.
 3. Known gaps, in the order they matter (the user-facing summary is `README.md` →
    "Limitations"): only the proximity activation
    and source line exist, with no TOML
-   config; permissions and `canSee`/vanish are not enforced; there is no server-side mute
-   manager; positions come from `PlayerMoveEvent` rather than live world reads; and the
+   config; permissions are not enforced and there is no server-side mute manager —
+   though vanish **is** honored: `tick.rs` re-mirrors the host's `canSee` into
+   `server.set_hidden_players` once a second and `proximity_listener_ids` mutes a
+   vanished pair in both directions; positions come from `PlayerMoveEvent` rather
+   than live world reads; and the
    decoration packets (`ConfigPlayerInfo`, `DistanceVisualize`, `AnimatedActionBar`, the
    addon/entity/static source variants) are not sent. Do not describe the plugin as "fully
    compatible" while those are open.

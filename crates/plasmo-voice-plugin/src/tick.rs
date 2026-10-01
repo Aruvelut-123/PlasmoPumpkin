@@ -33,8 +33,14 @@
 use pumpkin_plugin_api::Server;
 use pumpkin_plugin_api::events::{EventData, EventHandler, EventPriority, ServerTickStartEvent};
 
-use crate::channel;
+use crate::channel::{self, wit_uuid};
 use crate::runtime::with_runtime;
+
+/// How often the vanish table is re-read from the host, in server ticks.
+///
+/// 20 ticks ≈ 1 s at the default 20 Hz, which is fine for a visibility mirror:
+/// the host's `hidePlayer`/`showPlayer` calls take effect on the next sync.
+const VISIBILITY_SYNC_TICKS: i32 = 20;
 
 /// Cheap, zero-sized handle handed to the host as an event handler.
 ///
@@ -52,6 +58,11 @@ impl EventHandler<ServerTickStartEvent> for TickPump {
         server: Server,
         event: EventData<ServerTickStartEvent>,
     ) -> EventData<ServerTickStartEvent> {
+        // Re-mirror the host's vanish table a few times a second. Doing it here,
+        // before the pump, means this tick's relay already uses fresh visibility.
+        if event.tick % VISIBILITY_SYNC_TICKS == 0 {
+            sync_visibility(&server);
+        }
         let (received, sent) = with_runtime(|runtime| runtime.pump());
         // The socket and the channel cannot be driven from the same borrow, so the pump
         // queues control messages and they are written out here — inside the same tick,
@@ -62,6 +73,65 @@ impl EventHandler<ServerTickStartEvent> for TickPump {
         }
         event
     }
+}
+
+/// Re-reads the host's per-player `canSee` and pushes the result into the server.
+///
+/// The host owns the vanish truth (its `hidePlayer`/`showPlayer` state); the
+/// guest can only observe it through `canSee`. Rebuilding the whole table every
+/// sync keeps it free of stale entries for players who left between syncs, at
+/// the cost of an O(n²) `canSee` sweep over registered players — cheap at the
+/// player counts a 20 Hz schedule implies.
+fn sync_visibility(server: &Server) {
+    use std::collections::HashSet;
+
+    // Snapshot the ids inside the lock (cheap), then query the host outside it
+    // (each `can_see` is a host round-trip), then write the table back.
+    let ids = with_runtime(|runtime| {
+        runtime
+            .protocol()
+            .map_or_else(Vec::new, |protocol| protocol.registered_player_ids())
+    });
+    if ids.len() < 2 {
+        return;
+    }
+
+    let mut hidden = HashSet::new();
+    for (i, &viewer) in ids.iter().enumerate() {
+        for &target in &ids[i + 1..] {
+            // The generated resource methods take `other` by value (the handle
+            // is consumed), so fetch a fresh handle per direction.
+            let viewer_sees_target =
+                server
+                    .get_player_by_uuid(wit_uuid(viewer))
+                    .is_some_and(|viewer_player| {
+                        server
+                            .get_player_by_uuid(wit_uuid(target))
+                            .is_some_and(|target_player| viewer_player.can_see(target_player))
+                    });
+            if !viewer_sees_target {
+                hidden.insert((viewer, target));
+            }
+
+            let target_sees_viewer =
+                server
+                    .get_player_by_uuid(wit_uuid(target))
+                    .is_some_and(|target_player| {
+                        server
+                            .get_player_by_uuid(wit_uuid(viewer))
+                            .is_some_and(|viewer_player| target_player.can_see(viewer_player))
+                    });
+            if !target_sees_viewer {
+                hidden.insert((target, viewer));
+            }
+        }
+    }
+
+    with_runtime(|runtime| {
+        if let Some(protocol) = runtime.protocol_mut() {
+            protocol.set_hidden_players(hidden);
+        }
+    });
 }
 
 /// Registers the tick pump with the server.
