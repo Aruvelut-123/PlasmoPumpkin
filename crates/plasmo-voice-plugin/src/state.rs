@@ -11,7 +11,14 @@ use plasmo_voice_core::PROTOCOL_VERSION;
 use uuid::Uuid;
 
 /// File name inside the plugin data folder.
-pub const STATE_FILE: &str = "state.json";
+pub const STATE_FILE: &str = "state.toml";
+
+/// File name of the legacy `state.json` written by older plugin builds.
+///
+/// `load` still reads it when no `state.toml` exists, so upgrading a live server
+/// does not force every connected client to reconnect. `save` always writes the
+/// TOML form and never touches the stale JSON again.
+pub const LEGACY_STATE_FILE: &str = "state.json";
 
 /// Persisted server state.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,7 +91,62 @@ impl VoiceServerState {
         Ok(state)
     }
 
-    /// Serializes the state to a JSON document.
+    /// Parses the state from a TOML document.
+    ///
+    /// Same contract as [`Self::from_json`]: a flat, dependency-free table of
+    /// the few scalar fields the state holds. Unknown keys are ignored so a
+    /// newer build can add fields without breaking an older one.
+    pub fn from_toml(text: &str) -> Result<Self, String> {
+        let mut state = Self::default();
+
+        for (key, value) in parse_flat_table(text)? {
+            match key.as_str() {
+                "port" => {
+                    state.port = value
+                        .parse::<u16>()
+                        .map_err(|e| format!("invalid port {value:?}: {e}"))?;
+                }
+                "secret" => state.secret = unquote(&value),
+                "aes_key" => state.aes_key = unquote(&value),
+                "protocol_version" => state.protocol_version = unquote(&value),
+                "enabled" => {
+                    state.enabled = value
+                        .parse::<bool>()
+                        .map_err(|e| format!("invalid enabled {value:?}: {e}"))?;
+                }
+                // Unknown keys are ignored on purpose so a newer build can add
+                // fields without breaking an older one.
+                _ => {}
+            }
+        }
+
+        Ok(state)
+    }
+
+    /// Serializes the state to a **TOML** document.
+    ///
+    /// Strings and numbers are emitted with TOML quoting rules (`parse_flat_table`
+    /// is the matching reader), so the file stays human-editable.
+    #[must_use]
+    pub fn to_toml(&self) -> String {
+        format!(
+            "# PlasmoPumpkin voice server state — written by the plugin on every reload.\n\
+             # The secret and AES key are generated once on first start and must not\n\
+             # be shared between servers or edited by hand.\n\
+             port = {}\n\
+             secret = \"{}\"\n\
+             aes_key = \"{}\"\n\
+             protocol_version = \"{}\"\n\
+             enabled = {}\n",
+            self.port,
+            escape_toml(&self.secret),
+            escape_toml(&self.aes_key),
+            escape_toml(&self.protocol_version),
+            self.enabled,
+        )
+    }
+
+    /// Serializes the state to a JSON document (legacy format).
     #[must_use]
     pub fn to_json(&self) -> String {
         format!(
@@ -130,7 +192,8 @@ impl VoiceServerState {
         &self.secret
     }
 
-    /// Reads `state.json` from `folder`, falling back to defaults.
+    /// Reads `state.toml` from `folder`, falling back to the legacy `state.json`
+    /// and then to defaults.
     ///
     /// A corrupt or missing file is deliberately not fatal: the server starts with
     /// defaults and rewrites the file on the next save, so a bad edit cannot brick
@@ -140,7 +203,7 @@ impl VoiceServerState {
     pub fn load(folder: &str) -> Self {
         let path = format!("{folder}/{STATE_FILE}");
         match std::fs::read_to_string(&path) {
-            Ok(text) => Self::from_json(&text).unwrap_or_else(|error| {
+            Ok(text) => Self::from_toml(&text).unwrap_or_else(|error| {
                 tracing::warn!(
                     %path,
                     %error,
@@ -148,14 +211,30 @@ impl VoiceServerState {
                 );
                 Self::default()
             }),
-            Err(error) => {
-                tracing::debug!(%path, %error, "no voice server state yet; using defaults");
-                Self::default()
+            Err(_) => {
+                // No current-format file: fall back to the JSON a pre-TOML build
+                // left behind, so upgrading the plugin does not rotate the secret
+                // (which would kick every connected client).
+                let legacy = format!("{folder}/{LEGACY_STATE_FILE}");
+                match std::fs::read_to_string(&legacy) {
+                    Ok(text) => Self::from_json(&text).unwrap_or_else(|error| {
+                        tracing::warn!(
+                            %legacy,
+                            %error,
+                            "ignoring unreadable legacy voice server state; using defaults"
+                        );
+                        Self::default()
+                    }),
+                    Err(error) => {
+                        tracing::debug!(%path, %error, "no voice server state yet; using defaults");
+                        Self::default()
+                    }
+                }
             }
         }
     }
 
-    /// Writes `state.json` into `folder`.
+    /// Writes `state.toml` into `folder`.
     ///
     /// # Errors
     ///
@@ -163,7 +242,7 @@ impl VoiceServerState {
     /// silently continuing would lose the secret that connected clients are using.
     pub fn save(&self, folder: &str) -> Result<(), String> {
         let path = format!("{folder}/{STATE_FILE}");
-        std::fs::write(&path, self.to_json())
+        std::fs::write(&path, self.to_toml())
             .map_err(|error| format!("could not write {path}: {error}"))
     }
 
@@ -274,6 +353,90 @@ fn parse_flat_object(text: &str) -> Result<BTreeMap<String, String>, String> {
     }
 }
 
+/// Minimal flat TOML table parser: `key = value` lines where `value` is a
+/// number, bool, or quoted string. Returns `(key, raw_value)` pairs; quoted
+/// strings are returned **with** their surrounding quotes so `unquote` can
+/// decide. Comments (`# ...`), blank lines, and unknown keys are skipped.
+///
+/// Shared with [`crate::config`], whose `config.toml` uses the same flat shape.
+pub(crate) fn parse_flat_table(text: &str) -> Result<BTreeMap<String, String>, String> {
+    let mut map = BTreeMap::new();
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+
+    let skip_ws = |i: &mut usize| {
+        while *i < bytes.len() && (bytes[*i] as char).is_whitespace() {
+            *i += 1;
+        }
+    };
+
+    // Skip a leading BOM if a Windows editor left one behind.
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        i += 3;
+    }
+
+    loop {
+        skip_ws(&mut i);
+        if i >= bytes.len() {
+            return Ok(map);
+        }
+
+        // Comment line: skip to the next newline.
+        if bytes[i] == b'#' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        // Key: either a bare TOML key or a quoted one.
+        let key = if bytes[i] == b'"' {
+            read_toml_string(bytes, &mut i)?
+        } else {
+            let start = i;
+            while i < bytes.len()
+                && !(bytes[i] as char).is_whitespace()
+                && bytes[i] != b'='
+                && bytes[i] != b'\n'
+            {
+                i += 1;
+            }
+            if start == i {
+                return Err("expected a key".to_string());
+            }
+            text[start..i].to_string()
+        };
+
+        skip_ws(&mut i);
+        if i >= bytes.len() || bytes[i] != b'=' {
+            return Err(format!("expected '=' after key {key:?}"));
+        }
+        i += 1;
+        skip_ws(&mut i);
+        if i >= bytes.len() || bytes[i] == b'\n' {
+            return Err(format!("missing value for key {key:?}"));
+        }
+
+        // Value: quoted string, or a bare token up to end-of-line / comment.
+        let value = if bytes[i] == b'"' {
+            let raw = read_toml_string(bytes, &mut i)?;
+            format!("\"{raw}\"")
+        } else {
+            let start = i;
+            while i < bytes.len() && bytes[i] != b'\n' && bytes[i] != b'\r' && bytes[i] != b'#' {
+                i += 1;
+            }
+            text[start..i].trim_end().to_string()
+        };
+        map.insert(key, value);
+
+        // Skip the rest of the line (possible inline comment).
+        while i < bytes.len() && bytes[i] != b'\n' {
+            i += 1;
+        }
+    }
+}
+
 /// Reads a quoted string starting at `*i` (which must be the opening quote),
 /// handling `\"`, `\\`, `\n`, `\r`, `\t` and leaving `*i` after the closing
 /// quote.
@@ -308,8 +471,42 @@ fn read_string(bytes: &[u8], i: &mut usize) -> Result<String, String> {
     Err("unterminated string".to_string())
 }
 
-/// Strips the surrounding quotes from a raw JSON value, if present.
-fn unquote(raw: &str) -> String {
+/// Reads a TOML basic string (double-quoted, single-line) starting at `*i`
+/// (which must be the opening quote), handling `\"`, `\\` and `\n`/`\r`/`\t`
+/// escapes, and leaves `*i` after the closing quote.
+fn read_toml_string(bytes: &[u8], i: &mut usize) -> Result<String, String> {
+    *i += 1; // opening quote
+    let mut out = String::new();
+    while *i < bytes.len() {
+        match bytes[*i] {
+            b'"' => {
+                *i += 1;
+                return Ok(out);
+            }
+            b'\\' => {
+                *i += 1;
+                if *i >= bytes.len() {
+                    break;
+                }
+                out.push(match bytes[*i] {
+                    b'n' => '\n',
+                    b'r' => '\r',
+                    b't' => '\t',
+                    other => other as char,
+                });
+                *i += 1;
+            }
+            other => {
+                out.push(other as char);
+                *i += 1;
+            }
+        }
+    }
+    Err("unterminated string".to_string())
+}
+
+/// Strips the surrounding quotes from a raw JSON/TOML value, if present.
+pub(crate) fn unquote(raw: &str) -> String {
     raw.strip_prefix('"')
         .and_then(|s| s.strip_suffix('"'))
         .unwrap_or(raw)
@@ -332,6 +529,16 @@ fn escape(s: &str) -> String {
     out
 }
 
+/// Escapes a string for embedding in a double-quoted TOML string.
+///
+/// The Unicode escape used by TOML (`\uXXXX`) is avoided on purpose: `escape`
+/// already covers the characters the persisted values can realistically hold
+/// (UUIDs, hex, version strings), and anything exotic simply passes through,
+/// which keeps the writer and reader symmetric.
+fn escape_toml(s: &str) -> String {
+    escape(s)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,6 +555,42 @@ mod tests {
         let json = state.to_json();
         let back = VoiceServerState::from_json(&json).expect("parse");
         assert_eq!(back, state);
+    }
+
+    #[test]
+    fn round_trips_through_toml() {
+        let state = VoiceServerState {
+            port: 25565,
+            secret: "8f14e45f-ceea-467a-9a2e-1b0e5c3a7d11".to_string(),
+            aes_key: "0123456789abcdef0123456789abcdef".to_string(),
+            protocol_version: PROTOCOL_VERSION.to_string(),
+            enabled: false,
+        };
+        let toml = state.to_toml();
+        let back = VoiceServerState::from_toml(&toml).expect("parse");
+        assert_eq!(back, state);
+    }
+
+    #[test]
+    fn toml_tolerates_comments_unknown_keys_and_bom() {
+        let toml = "\u{feff}# auto-generated by PlasmoPumpkin\n\
+            # leading comment\n\
+            port = 12345  # trailing comment\n\
+            future_key = \"ignored\"\n\
+            secret = \"8f14e45f-ceea-467a-9a2e-1b0e5c3a7d11\"\n\
+            enabled = true\n";
+        let state = VoiceServerState::from_toml(toml).expect("parse");
+        assert_eq!(state.port, 12345);
+        assert!(state.enabled);
+        assert_eq!(state.secret, "8f14e45f-ceea-467a-9a2e-1b0e5c3a7d11");
+    }
+
+    #[test]
+    fn toml_rejects_malformed_lines() {
+        assert!(VoiceServerState::from_toml("not toml").is_err());
+        assert!(VoiceServerState::from_toml("port =").is_err());
+        assert!(VoiceServerState::from_toml("port = \"abc\"").is_err());
+        assert!(VoiceServerState::from_toml("enabled = maybe").is_err());
     }
 
     #[test]

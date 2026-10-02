@@ -65,6 +65,10 @@ the way out.
   where upstream instead aborts the config packet entirely for that client.
 * **Proximity voice** — players hear each other by distance, with the activation and
   source line from the in-game voice settings screen.
+* **Hosted configuration** — on first run the plugin writes a commented
+  `config.toml` template (with the state file, in the plugin data folder); the UDP
+  port, keep-alive timeout, advertised IP and the per-tick datagram budget are read
+  from it at load. Every key is optional — delete one to keep the default.
 * **Localized replies** — `LanguagePacket` is answered in the client's own locale.
 
 ## Logs
@@ -103,7 +107,9 @@ line's name.
 
 The connect → config → relay path works end to end, but this is not full upstream parity:
 
-* Only the **proximity** activation and source line exist; there is no config file.
+* Only the **proximity** activation and source line exist, and the plugin's own
+  `config.toml` covers only the server-runner knobs (`port`, `keep_alive_timeout_ms`,
+  `advertised_ip`, `max_datagrams_per_tick`) — there is no per-world voice config yet.
 * **Vanish is honored**: a periodic `canSee` sweep (once a second) mirrors the host's
   hide/show state into the relay, and a vanished pair goes silent in **both** directions.
   Server-side permissions and a mute manager are still missing.

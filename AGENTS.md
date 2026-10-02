@@ -312,8 +312,9 @@ fixing the disagreement is part of your change.
    `lib.rs` **outside** the `cfg` gate.
 3. Known gaps, in the order they matter (the user-facing summary is `README.md` →
    "Limitations"): only the proximity activation
-   and source line exist, with no TOML
-   config; permissions are not enforced and there is no server-side mute manager —
+   and source line exist, and the plugin's own `config.toml` covers only the
+   server-runner knobs (`port`, `keep_alive_timeout_ms`, `advertised_ip`,
+   `max_datagrams_per_tick`); permissions are not enforced and there is no server-side mute manager —
    though vanish **is** honored: `tick.rs` re-mirrors the host's `canSee` into
    `server.set_hidden_players` once a second and `proximity_listener_ids` mutes a
    vanished pair in both directions; positions come from `PlayerMoveEvent` rather
@@ -382,10 +383,10 @@ never relays a stranger's audio.
 | --- | --- |
 | `channel.rs` | the ABI shim: host events in, `Outbound` messages out. The only module that names the Pumpkin channel API. |
 | `control.rs` | the state machine: the handshake, the burst, and every serverbound packet's reply. Host-testable, no Pumpkin types. |
-| `config.rs` | the `ConfigPacket` this server advertises, and the version/distance gates. |
+| `config.rs` | the `ConfigPacket` this server advertises, the version/distance gates, and the plugin's own `config.toml` (the `port` / `keep_alive_timeout_ms` / `advertised_ip` / `max_datagrams_per_tick` knobs). |
 | `language.rs` | the translation table and the locale lookup (see §10). |
 | `server.rs` | the UDP semantics: per-connection secrets, activation- and position-filtered fan-out, keep-alive. |
-| `runtime.rs` | the process-global socket, the bind, and the bounded per-tick pump. |
+| `runtime.rs` | the process-global socket, the bind, and the bounded per-tick pump (the budget comes from `config.toml`'s `max_datagrams_per_tick`). |
 | `state.rs` | the persisted state: port, server secret, protocol version. |
 | `tick.rs` | the `ServerTickStartEvent` bridge (WASI only). |
 | the `glue` module in `lib.rs` | the `Plugin` impl and the IPC front door (WASI only). |

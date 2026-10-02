@@ -60,6 +60,9 @@ pub struct VoiceRuntime {
     /// How long a connection may stay silent before it is retired, mirroring
     /// upstream's `VoiceServerConfig.keepAliveTimeoutMs`.
     keep_alive_timeout_ms: u64,
+    /// Per-tick datagram budget, the rate limit that bounds the pump; see
+    /// [`MAX_DATAGRAMS_PER_TICK`] and [`VoiceRuntime::set_max_datagrams_per_tick`].
+    max_datagrams_per_tick: usize,
     /// Control-plane messages waiting to be delivered over the `plasmo:voice` channel.
     ///
     /// The socket and the channel are driven from the same tick but cannot be used from
@@ -110,6 +113,7 @@ impl VoiceRuntime {
             received: AtomicU64::new(0),
             sent: AtomicU64::new(0),
             keep_alive_timeout_ms: KEEP_ALIVE_TIMEOUT_MS,
+            max_datagrams_per_tick: MAX_DATAGRAMS_PER_TICK,
             control: Vec::new(),
             waiting_info: Vec::new(),
             advertised_ip: "0.0.0.0".to_string(),
@@ -195,6 +199,24 @@ impl VoiceRuntime {
     #[must_use]
     pub fn keep_alive_timeout(&self) -> u64 {
         self.keep_alive_timeout_ms
+    }
+
+    /// Overrides the per-tick datagram budget — the rate limit that keeps a UDP
+    /// flood from stalling a server tick. Read from `config.toml`'s
+    /// `max_datagrams_per_tick`; `0` means "keep the plugin default",
+    /// [`MAX_DATAGRAMS_PER_TICK`].
+    pub fn set_max_datagrams_per_tick(&mut self, budget: usize) {
+        self.max_datagrams_per_tick = if budget == 0 {
+            MAX_DATAGRAMS_PER_TICK
+        } else {
+            budget
+        };
+    }
+
+    /// The current per-tick datagram budget.
+    #[must_use]
+    pub fn max_datagrams_per_tick(&self) -> usize {
+        self.max_datagrams_per_tick
     }
 
     /// Installs the socket, the protocol state machine and the data folder.
@@ -310,7 +332,7 @@ impl VoiceRuntime {
         let mut buffer = [0u8; RECV_BUFFER];
         let mut control: Vec<Outbound> = Vec::new();
 
-        for _ in 0..MAX_DATAGRAMS_PER_TICK {
+        for _ in 0..self.max_datagrams_per_tick {
             let (len, from) = match socket.recv_from(&mut buffer) {
                 Ok(read) => read,
                 // The socket is non-blocking: an empty queue is the normal exit.

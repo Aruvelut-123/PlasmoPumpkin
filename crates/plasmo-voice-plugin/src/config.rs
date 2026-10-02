@@ -3,8 +3,13 @@
 //! Upstream builds this in `VoiceTcpServerConnectionManager.sendConfigInfo`
 //! (`server/common/src/main/java/su/plo/voice/server/connection/VoiceTcpServerConnectionManager.java:97`)
 //! out of `VoiceServerConfig` plus the activation and source-line registries. This plugin
-//! has no TOML config yet, so it ships the upstream **defaults**, and every constant below
-//! names the config key it stands in for so a future config file has somewhere to land.
+//! ships the upstream **defaults**, and every constant below names the config key it stands
+//! in for.
+//!
+//! The wire-facing [`ServerConfig`] is fixed at build time; the few server-runner knobs
+//! that do **not** go on the wire (`port`, `keep_alive_timeout_ms`, `advertised_ip`,
+//! datagram budget) are read from a flat `config.toml` in the data folder by
+//! [`PluginConfig::load`].
 //!
 //! ## What the client actually requires (verified in the client, not guessed)
 //!
@@ -289,6 +294,295 @@ pub fn calculate_allowed_distance(activation: &VoiceActivation, requested: i32) 
     } else {
         activation.default_distance
     }
+}
+
+/// The plugin's own `config.toml` file name, in the data folder.
+pub const CONFIG_FILE: &str = "config.toml";
+
+/// The commented template written out on first run, so an operator sees every
+/// knob the server reads without hunting through source. Every key here is
+/// optional; the flat parser ignores comments, blanks, and unknown keys.
+pub const DEFAULT_CONFIG_TOML: &str = "# Plasmo Voice server configuration
+# Every key is optional: delete the ones you want to keep the default.
+#
+# UDP port the voice server listens on. 0 means \"trust state.toml\": the first
+# run asks the host for an ephemeral port and remembers it, and reloads keep
+# listening on that same port. Set this to pin the port permanently.
+# port = 24424
+#
+# How long a connection may stay silent before it is retired, in milliseconds
+# (upstream: voice.keepAliveTimeoutMs, default 15000).
+# keep_alive_timeout_ms = 15000
+#
+# The IP advertised to clients in ConnectionPacket.ip (upstream: [host].public
+# ip). The default, 0.0.0.0, makes the official client use the Minecraft host it
+# is already connected to, which is right for a voice server on the same machine.
+# Point it at a public address or domain only when the voice port is elsewhere.
+# advertised_ip = \"0.0.0.0\"
+#
+# Datagrams drained from the UDP socket per server tick. This is the rate limit
+# that keeps a flood from stalling the tick; anything beyond it is dropped by the
+# OS buffer, exactly like an overloaded real-time server (default 256).
+# max_datagrams_per_tick = 256
+";
+
+/// Server-runner settings read from `config.toml` in the data folder.
+///
+/// Unlike [`ServerConfig`] — which is what the *client* is told and is fixed at
+/// build time — these are the knobs that decide how the voice server itself runs:
+/// which UDP port it binds, how long a silent connection is kept alive, which IP it
+/// advertises, and the per-tick datagram budget (the rate limit that keeps a flood
+/// from stalling a server tick). Every key is optional; a missing key keeps the
+/// upstream default, and unknown keys are ignored, so a config file can be
+/// forward-compatible across plugin versions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginConfig {
+    /// UDP port to bind. `0` (the default) means "use whatever `state.toml`
+    /// records", which is the historical behaviour: first run picks an ephemeral
+    /// port, later runs keep listening on it. A non-zero value here wins over the
+    /// state file.
+    pub port: u16,
+    /// How long a connection may stay silent before it is retired, mirroring
+    /// `VoiceServerConfig.keepAliveTimeoutMs` (`voice.keepAliveTimeoutMs`),
+    /// default 15_000.
+    pub keep_alive_timeout_ms: u64,
+    /// The IP advertised in `ConnectionPacket.ip` (`[host].public ip` upstream),
+    /// default `0.0.0.0` — which the official client resolves to its Minecraft host.
+    pub advertised_ip: String,
+    /// Datagrams drained from the socket per tick, mirroring the fixed budget in
+    /// `runtime::MAX_DATAGRAMS_PER_TICK` (itself the upstream-equivalent rate
+    /// limit), default 256.
+    pub max_datagrams_per_tick: usize,
+}
+
+impl Default for PluginConfig {
+    fn default() -> Self {
+        Self {
+            port: 0,
+            keep_alive_timeout_ms: crate::server::KEEP_ALIVE_TIMEOUT_MS,
+            advertised_ip: "0.0.0.0".to_string(),
+            max_datagrams_per_tick: crate::runtime::MAX_DATAGRAMS_PER_TICK,
+        }
+    }
+}
+
+impl PluginConfig {
+    /// Writes the commented default [`DEFAULT_CONFIG_TOML`] template into `folder`
+    /// on first run, unless the file already exists. Mirrors how `state.toml` is
+    /// created; an operator who already dropped in a `config.toml` is never
+    /// overwritten.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the data folder is not writable, which the caller must surface —
+    /// silently skipping the template would leave the operator without a config file
+    /// to edit.
+    pub fn create_default_if_missing(folder: &str) -> Result<bool, String> {
+        let path = format!("{folder}/{CONFIG_FILE}");
+        if std::path::Path::new(&path).exists() {
+            return Ok(false);
+        }
+        std::fs::write(&path, DEFAULT_CONFIG_TOML).map_err(|error| {
+            format!("could not write the default voice config to {path}: {error}")
+        })?;
+        tracing::info!(%path, "wrote the default voice config template");
+        Ok(true)
+    }
+
+    /// Reads `config.toml` from `folder`, falling back to defaults when the file is
+    /// missing or unreadable (a warn is logged either way; a bad *value* is not fatal).
+    #[must_use]
+    pub fn load(folder: &str) -> Self {
+        let path = format!("{folder}/{CONFIG_FILE}");
+        match std::fs::read_to_string(&path) {
+            Ok(text) => Self::from_toml(&text).unwrap_or_else(|error| {
+                tracing::warn!(
+                    %path,
+                    %error,
+                    "ignoring unreadable voice config; using defaults"
+                );
+                Self::default()
+            }),
+            Err(_) => Self::default(),
+        }
+    }
+
+    /// Parses a flat `key = value` TOML document, the same shape `state.toml` uses.
+    ///
+    /// # Errors
+    ///
+    /// Fails only when a *known* key has an un-parseable value; malformed lines are
+    /// skipped by the shared flat parser, and unknown keys are left untouched.
+    pub fn from_toml(text: &str) -> Result<Self, String> {
+        let mut config = Self::default();
+        let mut unknown = Vec::new();
+        for (key, value) in crate::state::parse_flat_table(text)? {
+            match key.as_str() {
+                "port" => {
+                    config.port = value.parse().map_err(|error| {
+                        format!("config key 'port' value {value:?} is not a port number: {error}")
+                    })?
+                }
+                "keep_alive_timeout_ms" => {
+                    config.keep_alive_timeout_ms = value.parse().map_err(|error| {
+                        format!(
+                            "config key 'keep_alive_timeout_ms' value {value:?} is not an \
+                             unsigned integer: {error}"
+                        )
+                    })?;
+                }
+                "advertised_ip" => config.advertised_ip = crate::state::unquote(&value),
+                "max_datagrams_per_tick" => {
+                    config.max_datagrams_per_tick = value.parse().map_err(|error| {
+                        format!(
+                            "config key 'max_datagrams_per_tick' value {value:?} is not an \
+                             unsigned integer: {error}"
+                        )
+                    })?;
+                }
+                _ => unknown.push(key),
+            }
+        }
+        if !unknown.is_empty() {
+            tracing::warn!(?unknown, "ignoring unknown keys in the voice config file");
+        }
+        Ok(config)
+    }
+
+    /// Renders the config back to flat TOML, for examples and tests.
+    #[must_use]
+    pub fn to_toml(&self) -> String {
+        let mut out = String::from("# Plasmo Voice server configuration\n");
+        out.push_str(&format!(
+            "port = {}\nkeep_alive_timeout_ms = {}\nadvertised_ip = {}\n\
+             max_datagrams_per_tick = {}\n",
+            self.port,
+            self.keep_alive_timeout_ms,
+            render_string(&self.advertised_ip, "\"0.0.0.0\""),
+            self.max_datagrams_per_tick,
+        ));
+        out
+    }
+}
+
+/// Renders a string for flat TOML: quoted, with the default spelled out plainly.
+fn render_string(value: &str, default: &str) -> String {
+    if value == "0.0.0.0" {
+        return default.to_string();
+    }
+    format!("{value:?}")
+}
+
+#[cfg(test)]
+mod plugin_config_tests {
+    use super::*;
+
+    #[test]
+    fn the_default_config_keeps_the_historical_behaviour() {
+        let config = PluginConfig::default();
+        assert_eq!(config.port, 0, "port 0 means 'trust state.toml'");
+        assert_eq!(config.keep_alive_timeout_ms, 15_000);
+        assert_eq!(config.advertised_ip, "0.0.0.0");
+        assert_eq!(config.max_datagrams_per_tick, 256);
+    }
+
+    #[test]
+    fn a_minimal_config_file_overrides_only_what_it_sets() {
+        let config = PluginConfig::from_toml("# comment\nkeep_alive_timeout_ms = 5000\n")
+            .expect("known keys parse");
+        assert_eq!(config.port, 0, "unset keys keep defaults");
+        assert_eq!(config.keep_alive_timeout_ms, 5000);
+        assert_eq!(config.advertised_ip, "0.0.0.0");
+        assert_eq!(config.max_datagrams_per_tick, 256);
+    }
+
+    #[test]
+    fn a_full_config_file_parses_every_key() {
+        let config = PluginConfig::from_toml(
+            "port = 24424\nkeep_alive_timeout_ms = 30000\nadvertised_ip = \"mc.example.com\"\n\
+             max_datagrams_per_tick = 512\n",
+        )
+        .expect("all keys parse");
+        assert_eq!(config.port, 24424);
+        assert_eq!(config.keep_alive_timeout_ms, 30_000);
+        assert_eq!(config.advertised_ip, "mc.example.com");
+        assert_eq!(config.max_datagrams_per_tick, 512);
+    }
+
+    #[test]
+    fn an_unknown_key_is_ignored_not_fatal() {
+        let config = PluginConfig::from_toml("future_key = \"soon\"\nport = 12\n")
+            .expect("unknown keys are skipped");
+        assert_eq!(config.port, 12);
+    }
+
+    #[test]
+    fn a_bad_value_for_a_known_key_is_reported() {
+        let error = PluginConfig::from_toml("keep_alive_timeout_ms = \"not a number\"\n")
+            .expect_err("a non-numeric known key fails");
+        assert!(error.contains("keep_alive_timeout_ms"), "{error}");
+    }
+
+    #[test]
+    fn to_toml_round_trips() {
+        let config = PluginConfig::from_toml(
+            "port = 24424\nadvertised_ip = \"mc.example.com\"\nmax_datagrams_per_tick = 100\n",
+        )
+        .expect("parses");
+        let rendered = config.to_toml();
+        let parsed = PluginConfig::from_toml(&rendered).expect("rendered config parses");
+        // `to_toml` writes the default keep-alive back out as its default literal;
+        // everything else must round-trip exactly.
+        assert_eq!(parsed.port, config.port);
+        assert_eq!(parsed.advertised_ip, config.advertised_ip);
+        assert_eq!(parsed.max_datagrams_per_tick, config.max_datagrams_per_tick);
+        assert_eq!(parsed.keep_alive_timeout_ms, 15_000);
+        assert_eq!(parsed, config);
+    }
+
+    #[test]
+    fn the_default_template_parses_to_the_default_config() {
+        let parsed = PluginConfig::from_toml(DEFAULT_CONFIG_TOML).expect("the template parses");
+        assert_eq!(parsed, PluginConfig::default());
+    }
+
+    #[test]
+    fn the_template_is_written_only_when_the_file_is_missing() {
+        let dir = temp_folder();
+        let path = format!("{dir}/{CONFIG_FILE}");
+
+        let created = PluginConfig::create_default_if_missing(&dir).expect("first write works");
+        assert!(created, "a missing file is created");
+        assert!(
+            std::path::Path::new(&path).exists(),
+            "the template lands on disk"
+        );
+
+        // An operator's own file must never be overwritten.
+        std::fs::write(&path, "port = 7777\n").expect("operator file writes");
+        let created_again = PluginConfig::create_default_if_missing(&dir).expect("second call ok");
+        assert!(!created_again, "an existing file is left alone");
+        let parsed = PluginConfig::load(&dir);
+        assert_eq!(parsed.port, 7777, "the operator's file is what is read");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+/// A uniquely-named scratch folder under the system temp dir, so parallel tests
+/// never collide.
+#[cfg(test)]
+fn temp_folder() -> String {
+    let unique = format!(
+        "plasmo-voice-config-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    );
+    let dir = std::env::temp_dir().join(unique);
+    std::fs::create_dir_all(&dir).expect("scratch dir creates");
+    dir.to_string_lossy().into_owned()
 }
 
 #[cfg(test)]

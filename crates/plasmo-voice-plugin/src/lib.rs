@@ -232,6 +232,7 @@ mod glue {
     use pumpkin_plugin_api::{Context, Plugin, PluginMetadata, permissions, register_plugin};
     use uuid::Uuid;
 
+    use crate::config::PluginConfig;
     use crate::crypto::AesKey;
     use crate::runtime::{VoiceRuntime, bind, with_runtime};
     use crate::server::VoiceServer;
@@ -276,11 +277,21 @@ mod glue {
             tracing::info!(%folder, "loading the Plasmo Voice server");
 
             let mut persisted = VoiceServerState::load(&folder);
+            // An absent `config.toml` gets a commented default template (never
+            // overwriting one the operator already wrote), then it is parsed the
+            // same way an existing file is.
+            PluginConfig::create_default_if_missing(&folder)?;
+            let config = PluginConfig::load(&folder);
 
             // Port 0 means "not configured yet": ask the host for an ephemeral port
             // and remember what we actually got, so a reload keeps listening on the
-            // same one.
-            let (socket, port) = bind(persisted.port)?;
+            // same one. A non-zero `config.toml` port wins over the state file.
+            let bind_port = if config.port > 0 {
+                config.port
+            } else {
+                persisted.port
+            };
+            let (socket, port) = bind(bind_port)?;
             let secret = if persisted.secret.is_empty() {
                 VoiceServerState::generate_secret(port)
             } else {
@@ -320,6 +331,11 @@ mod glue {
                 .map_err(|error| format!("generated secret {secret:?} is not a UUID: {error}"))?;
 
             with_runtime(|runtime| {
+                // `config.toml` knobs are applied on top of the runtime defaults
+                // *before* the socket is installed, so the first pump uses them.
+                runtime.set_advertised_ip(config.advertised_ip.clone());
+                runtime.set_keep_alive_timeout(config.keep_alive_timeout_ms);
+                runtime.set_max_datagrams_per_tick(config.max_datagrams_per_tick);
                 runtime.start(
                     socket,
                     VoiceServer::new(parsed_secret, aes_key),
