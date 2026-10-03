@@ -112,20 +112,22 @@ with `en_us` filling what a translation does not carry. It is not cosmetic: with
 voice settings screen prints the raw `pv.activation.proximity` key in place of the source
 line's name.
 
-## Limitations
+## Scope
 
-The connect → config → relay path works end to end, but this is not full upstream parity:
+The connect → config → relay path works end to end. The surface deliberately matches a
+**zero-addon upstream server** — stock `plasmo-voice` registers nothing more:
 
-* Only the **proximity** activation and source line exist — exactly what a zero-addon
-  upstream server has (`ProximityServerActivation` is the only activation upstream
-  registers by default). The plugin's own `config.toml` covers the server-runner
-  knobs (`port`, `keep_alive_timeout_ms`, `advertised_ip`, `max_datagrams_per_tick`,
-  `sample_rate`, `mtu_size`, `distances`, `default_distance`,
-  `max_extra_audio_broadcast_distance`, `notify_unmuted`, `notify_muted`,
-  `default_language`, `forced_language`, `client_mod_min_version`) and is **global**,
-  like upstream's — upstream's `VoiceServerConfig` has no per-world voice config
-  either. Extra activations ("global" channels and the like) are addon-registered
-  through the Java API and need an addon host this plugin does not provide.
+* Only the **proximity** activation and source line exist (`ProximityServerActivation`
+  is the only activation upstream registers by default). Only **player** voice sources
+  are relayed — no addon/entity/static variants, same as upstream's own server.
+* `config.toml` covers the server-runner knobs (`port`, `keep_alive_timeout_ms`,
+  `advertised_ip`, `max_datagrams_per_tick`, `sample_rate`, `mtu_size`, `distances`,
+  `default_distance`, `max_extra_audio_broadcast_distance`, `notify_unmuted`,
+  `notify_muted`, `default_language`, `forced_language`, `client_mod_min_version`) and
+  is **global** — upstream's `VoiceServerConfig` has no per-world section either.
+* No server-side jitter buffer, reordering or packet-loss concealment — frames are
+  relayed as they arrive, and the client's own jitter buffer smooths the stream (the
+  same split upstream relies on).
 * **Vanish is honored**: a periodic `canSee` sweep (once a second) mirrors the host's
   hide/show state into the relay, and a vanished pair goes silent in **both** directions.
 * **Mutes are enforced**: `/vmute`, `/vunmute` and `/vmutelist` are gated on the
@@ -139,12 +141,15 @@ The connect → config → relay path works end to end, but this is not full ups
 * **Permissions are live**: `ConfigPacket` still carries upstream's default
   `pv.allow_freecam: true`, but the server re-reads the host's real permission
   every second and re-sends `ConfigPlayerInfo` as soon as it differs — a
-  mid-session change reaches the client the way upstream's event would. Only
-  **player** voice sources exist — no addon/entity/static variants, like upstream's
-  own server. (`DistanceVisualize` **is** sent on proximity distance changes.)
-* No server-side jitter buffer, reordering or packet-loss concealment — frames are
-  relayed as they arrive, and the client's own jitter buffer smooths the stream (the
-  same split upstream relies on).
+  mid-session change reaches the client the way upstream's event would.
+  (`DistanceVisualize` **is** sent on proximity distance changes.)
+
+What a **full upstream deployment** can do that this plugin cannot:
+
+* **Addon-host.** Extra activations ("global" channels and the like), extra source
+  lines and entity/static sources are registered by Java addons through the server
+  API. Pumpkin exposes no such plugin API, so this plugin cannot host them; the
+  client would need those brands to exist on the wire, and they do not here.
 
 ## Development
 

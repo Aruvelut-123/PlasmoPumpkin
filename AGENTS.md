@@ -311,17 +311,20 @@ fixing the disagreement is part of your change.
    anything host-testable (for example `player_connect_reply`, the reply builder) belongs in
    `lib.rs` **outside** the `cfg` gate.
 3. Known gaps, in the order they matter (the user-facing summary is `README.md` →
-   "Limitations"): only the proximity activation
-   and source line exist — which is exactly upstream's zero-addon surface: the
-   server registers just `ProximityServerActivation` (only activation upstream
-   creates; "global"/addon activations come from the Java addon API, which this
-   plugin has no host for) — and the plugin's own `config.toml` covers only the
+   "Scope"): the one real gap is the **addon host** — upstream lets Java
+   addons register extra activations ("global" channels and the like), extra
+   source lines and entity/static voice sources through
+   `activationManager`/`sourceLineManager`; this plugin has no such API, so only
+   the stock surface exists. Everything else that looks like a gap is actually
+   upstream parity and must be described as such, never as a limitation:
+   the plugin's own `config.toml` covers only the
    server-runner knobs (`port`, `keep_alive_timeout_ms`, `advertised_ip`,
    `max_datagrams_per_tick`, `sample_rate`, `mtu_size`, `distances`,
    `default_distance`, `max_extra_audio_broadcast_distance`, `notify_unmuted`,
    `notify_muted`, `default_language`, `forced_language`,
-   `client_mod_min_version`), applied globally like upstream's (upstream's
-   `VoiceServerConfig` has no per-world section either);
+   `client_mod_min_version`), applied globally — upstream's `VoiceServerConfig`
+   has no per-world section either, and the only activation upstream ever
+   registers is `ProximityServerActivation`;
    permissions **are** enforced (`pv.mute`/`pv.unmute`/`pv.mutelist`, op by
    default, double-checked inside the handlers), both target commands take
    `@`-selectors, and the client-side duration suggestions are not mirrored;
@@ -349,7 +352,7 @@ fixing the disagreement is part of your change.
    (`VoiceTcpServerConnectionManager.java:109-125`). This server instead logs the failure
    and sends a `ConfigPacket` with `encryption: None`, which the client accepts natively —
    `ConfigPacket.encryption` is `@Nullable` and `ModServerConnection.handle` leaves
-   `Encryption` null when it is. Describe it in "How it works", never in "Limitations", and
+   `Encryption` null when it is. Describe it in "How it works", never in "Scope", and
    do not present the fallback as parity with upstream: upstream refuses the client.
 4. **Keep this file and `README.md` in sync with reality.** If a claim in either document
    is wrong, fixing it is part of your change. Keep the split deliberate: `README.md` is a
