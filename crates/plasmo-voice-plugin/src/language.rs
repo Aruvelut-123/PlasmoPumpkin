@@ -65,22 +65,58 @@ pub fn locales() -> impl Iterator<Item = &'static str> {
 /// `getClientLanguage(languageName)` — the flattened client scope of a locale, sorted by
 /// key so the packet is deterministic.
 ///
-/// An unknown (or empty) locale is answered in the fallback locale, exactly as
-/// `getLanguage` recurses with `null` and lands on the default.
+/// Mirrors `BaseVoiceServer.java:248-253` plus the translator's `getLanguage`:
+///
+/// * `forced` — `voice.forcedLanguage`. When non-empty, **every** answer is this locale
+///   (gaps cannot exist; a locale we do not ship collapses to the fallback), whatever the
+///   client asked for.
+/// * `default` — `voice.defaultLanguage`. The base table a normal request is answered
+///   from; the requested locale's own value wins and the default only fills gaps, exactly
+///   like `fillMissing`'s `putIfAbsent`.
+/// * An unknown (or empty) locale is answered in the default — the same as `getLanguage`
+///   recursing with `null` and landing on the translator's default.
 #[must_use]
-pub fn client_language(requested: &str) -> Vec<(String, String)> {
-    let mut table = scope_of(FALLBACK_LANGUAGE);
+pub fn client_language(requested: &str, forced: &str, default: &str) -> Vec<(String, String)> {
+    let default = normalized(default);
+    // Empty means "not forced"; only a non-empty value is normalized.
+    let forced = if forced.trim().is_empty() {
+        String::new()
+    } else {
+        normalized(forced)
+    };
 
-    let normalized = requested.trim().to_ascii_lowercase();
-    if normalized != FALLBACK_LANGUAGE {
-        for (key, value) in scope_of(&normalized) {
+    if !forced.is_empty() {
+        // A forced language is the whole answer. If we do not ship it, there is nothing
+        // to answer in — fall through to the default, like the translator would.
+        let mut table = scope_of(&forced);
+        if table.is_empty() {
+            table = scope_of(&default);
+        }
+        return table.into_iter().collect();
+    }
+
+    let mut table = scope_of(&default);
+
+    let requested = normalized(requested);
+    if requested != default && !requested.is_empty() {
+        for (key, value) in scope_of(&requested) {
             // `fillMissing` uses `putIfAbsent` in the other direction: the locale's own
-            // value wins, the fallback only fills gaps.
+            // value wins, the default only fills gaps.
             table.insert(key, value);
         }
     }
 
     table.into_iter().collect()
+}
+
+/// Lowercases and trims a locale, with the shipped fallback standing in for garbage.
+fn normalized(locale: &str) -> String {
+    let locale = locale.trim().to_ascii_lowercase();
+    if locale.is_empty() {
+        FALLBACK_LANGUAGE.to_string()
+    } else {
+        locale
+    }
 }
 
 /// The flattened client scope of one locale, or an empty table when it is not shipped.
@@ -230,18 +266,18 @@ mod tests {
     /// The lookup lowercases the request, so Minecraft's own `zh_cn` finds our file.
     #[test]
     fn a_locale_is_looked_up_case_insensitively() {
-        let zh = client_language("zh_cn");
+        let zh = client_language("zh_cn", "", FALLBACK_LANGUAGE);
         assert_eq!(
             zh,
             vec![(PROXIMITY_TRANSLATION.to_string(), "附近".to_string())]
         );
         assert_eq!(
-            client_language("ZH_CN"),
+            client_language("ZH_CN", "", FALLBACK_LANGUAGE),
             zh,
             "the lookup must be case-insensitive, like getLanguage's lowercase()"
         );
         assert_eq!(
-            client_language(" ru_ru "),
+            client_language(" ru_ru ", "", FALLBACK_LANGUAGE),
             vec![(PROXIMITY_TRANSLATION.to_string(), "Локальный".to_string())],
             "surrounding whitespace must not defeat the lookup"
         );
@@ -254,11 +290,52 @@ mod tests {
 
         for unknown in ["", "  ", "xx_yy", "zh"] {
             assert_eq!(
-                client_language(unknown),
+                client_language(unknown, "", FALLBACK_LANGUAGE),
                 english,
                 "{unknown:?} must fall back to {FALLBACK_LANGUAGE}"
             );
         }
+    }
+
+    /// The configured `defaultLanguage` replaces the built-in fallback entirely: an
+    /// unknown request is answered in *that* locale, and its own table fills gaps for a
+    /// shipped locale the way `en_us` used to.
+    #[test]
+    fn a_configured_default_language_takes_over_the_fallback() {
+        let zh = vec![(PROXIMITY_TRANSLATION.to_string(), "附近".to_string())];
+        assert_eq!(client_language("xx_yy", "", "zh_cn"), zh);
+
+        let ru = vec![(PROXIMITY_TRANSLATION.to_string(), "Локальный".to_string())];
+        assert_eq!(
+            client_language("ru_ru", "", "zh_cn"),
+            ru,
+            "the requested locale's own value must win over the default"
+        );
+        assert_eq!(
+            client_language("zh_cn", "", "ru_ru"),
+            zh,
+            "the requested locale's own value must win over the default"
+        );
+    }
+
+    /// A configured `forcedLanguage` is the whole answer: the client's request is ignored
+    /// (`BaseVoiceServer.java:248-253`), and an unshipped forced locale collapses to the
+    /// fallback rather than to an empty map.
+    #[test]
+    fn a_configured_forced_language_overrides_every_request() {
+        let ru = vec![(PROXIMITY_TRANSLATION.to_string(), "Локальный".to_string())];
+        for requested in ["zh_cn", "en_us", "xx_yy", ""] {
+            assert_eq!(
+                client_language(requested, " ru_ru ", FALLBACK_LANGUAGE),
+                ru,
+                "{requested:?} must be answered in the forced locale"
+            );
+        }
+        assert_eq!(
+            client_language("zh_cn", "xx_yy", FALLBACK_LANGUAGE),
+            vec![(PROXIMITY_TRANSLATION.to_string(), "Proximity".to_string())],
+            "an unshipped forced locale falls back, never answers empty"
+        );
     }
 
     /// The parser drops the scope name, joins nested tables with `.`, and leaves the

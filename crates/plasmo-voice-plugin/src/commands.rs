@@ -77,11 +77,14 @@ pub(crate) fn broadcast_player_info(player_id: &Uuid) {
 #[derive(Clone)]
 struct MuteHandler {
     folder: String,
+    /// `voice.notifications().muted()`: whether the muted player is told the
+    /// "you've been muted" notice (`VoiceMuteCommand.kt:33`).
+    notify: bool,
 }
 
 impl MuteHandler {
-    fn new(folder: String) -> Self {
-        Self { folder }
+    fn new(folder: String, notify: bool) -> Self {
+        Self { folder, notify }
     }
 }
 
@@ -159,8 +162,10 @@ impl CommandHandler for MuteHandler {
                 continue;
             }
             broadcast_player_info(&player_id);
-            if let Some(player) = server.get_player_by_uuid(wit_uuid(player_id)) {
-                player.send_system_message(TextComponent::text(&notice), false);
+            if self.notify {
+                if let Some(player) = server.get_player_by_uuid(wit_uuid(player_id)) {
+                    player.send_system_message(TextComponent::text(&notice), false);
+                }
             }
             match expiry {
                 None => feedback(&sender, format!("{name} muted permanently")),
@@ -178,11 +183,14 @@ impl CommandHandler for MuteHandler {
 /// mutation, exactly like `/vmute`.
 struct UnmuteHandler {
     folder: String,
+    /// `voice.notifications().unmuted()`: whether the unmuted player is told the
+    /// "you've been unmuted" notice (`VoiceUnmuteCommand.kt:29`).
+    notify: bool,
 }
 
 impl UnmuteHandler {
-    fn new(folder: String) -> Self {
-        Self { folder }
+    fn new(folder: String, notify: bool) -> Self {
+        Self { folder, notify }
     }
 }
 
@@ -226,7 +234,12 @@ impl CommandHandler for UnmuteHandler {
                         continue;
                     }
                     broadcast_player_info(&player_id);
-                    player.send_system_message(TextComponent::text(&mute::unmuted_notice()), false);
+                    if self.notify {
+                        player.send_system_message(
+                            TextComponent::text(&mute::unmuted_notice()),
+                            false,
+                        );
+                    }
                     feedback(&sender, format!("{name} unmuted"));
                 }
                 None => feedback(&sender, format!("{name} is not muted")),
@@ -284,20 +297,20 @@ impl CommandHandler for ListHandler {
 }
 
 /// Builds the `/vmute` tree: `vmute → targets → [duration → [reason]]`.
-fn build_mute_command(folder: &str) -> Command {
+fn build_mute_command(folder: &str, notify: bool) -> Command {
     // Terminal node for `/vmute <targets> <duration> <reason>`.
     let reason = CommandNode::argument("reason", &ArgumentType::String(StringType::Greedy))
-        .execute(MuteHandler::new(folder.to_string()));
+        .execute(MuteHandler::new(folder.to_string(), notify));
 
     // `/vmute <targets> <duration>` (reason absent) and the full shape above.
     let duration = CommandNode::argument("duration", &ArgumentType::String(StringType::SingleWord))
         .then(reason)
-        .execute(MuteHandler::new(folder.to_string()));
+        .execute(MuteHandler::new(folder.to_string(), notify));
 
     // `/vmute <targets>` (duration absent → permanent) and the two longer shapes.
     let targets = CommandNode::argument("targets", &ArgumentType::Players)
         .then(duration)
-        .execute(MuteHandler::new(folder.to_string()));
+        .execute(MuteHandler::new(folder.to_string(), notify));
 
     Command::new(&["vmute".to_string()], "Mute players in the voice chat").then(targets)
 }
@@ -310,9 +323,9 @@ fn build_mute_command(folder: &str) -> Command {
 /// cannot be resolved by the host (it only knows online players) — upstream
 /// resolves it through the profile service — so an offline unmute still has to
 /// wait for the player, or be done by editing `mutes.toml`.
-fn build_unmute_command(folder: &str) -> Command {
+fn build_unmute_command(folder: &str, notify: bool) -> Command {
     let targets = CommandNode::argument("targets", &ArgumentType::Players)
-        .execute(UnmuteHandler::new(folder.to_string()));
+        .execute(UnmuteHandler::new(folder.to_string(), notify));
 
     Command::new(&["vunmute".to_string()], "Unmute players in the voice chat").then(targets)
 }
@@ -328,7 +341,14 @@ fn build_mute_list_command() -> Command {
 /// the same spelling the handlers check, so `Context::register_permission` and
 /// the host's command requirement agree even under a host that derives the
 /// requirement from the registered node rather than the command's.
-pub fn register(context: &Context) -> Result<usize, String> {
+///
+/// `notify_muted` / `notify_unmuted` mirror `voice.notifications().muted()` /
+/// `.unmuted()`: whether the affected player is told by `/vmute` / `/vunmute`.
+pub fn register(
+    context: &Context,
+    notify_muted: bool,
+    notify_unmuted: bool,
+) -> Result<usize, String> {
     let folder = context.get_data_folder();
 
     // Load the persisted mute table into the store so `/vmutelist` and the
@@ -353,8 +373,8 @@ pub fn register(context: &Context) -> Result<usize, String> {
         }
     }
 
-    context.register_command(build_mute_command(&folder), PERM_MUTE);
-    context.register_command(build_unmute_command(&folder), PERM_UNMUTE);
+    context.register_command(build_mute_command(&folder, notify_muted), PERM_MUTE);
+    context.register_command(build_unmute_command(&folder, notify_unmuted), PERM_UNMUTE);
     context.register_command(build_mute_list_command(), PERM_MUTE_LIST);
 
     Ok(3)

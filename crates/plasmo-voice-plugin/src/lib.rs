@@ -236,7 +236,7 @@ mod glue {
     use pumpkin_plugin_api::{Context, Plugin, PluginMetadata, permissions, register_plugin};
     use uuid::Uuid;
 
-    use crate::config::PluginConfig;
+    use crate::config::{PluginConfig, ServerConfig};
     use crate::crypto::AesKey;
     use crate::runtime::{VoiceRuntime, bind, with_runtime};
     use crate::server::VoiceServer;
@@ -342,7 +342,16 @@ mod glue {
                 runtime.set_max_datagrams_per_tick(config.max_datagrams_per_tick);
                 runtime.start(
                     socket,
-                    VoiceServer::new(parsed_secret, aes_key),
+                    // The ConfigPacket-facing knobs (distances, default distance,
+                    // extra broadcast distance, mute notifications, languages and
+                    // the client version floor) live on `ServerConfig`; apply the
+                    // operator's `config.toml` on top of the upstream defaults or
+                    // only the defaults would ever be advertised.
+                    VoiceServer::new_with_config(
+                        parsed_secret,
+                        aes_key,
+                        ServerConfig::new_with_overrides(parsed_secret, &config),
+                    ),
                     folder.clone(),
                 );
             });
@@ -359,8 +368,12 @@ mod glue {
 
             // The mute administration commands (`/vmute`, `/vunmute`, `/vmutelist`)
             // and their permission nodes mirror upstream's `voiceMuteCommand`,
-            // `voiceUnmuteCommand` and `voiceMuteListCommand`.
-            let command_count = commands::register(&context)?;
+            // `voiceUnmuteCommand` and `voiceMuteListCommand`. The notification
+            // knobs (`voice.notifications().muted()` / `.unmuted()`) are read here
+            // once, at registration: they decide whether the affected player is
+            // told by `/vmute` / `/vunmute`.
+            let command_count =
+                commands::register(&context, config.notify_muted, config.notify_unmuted)?;
 
             // The values are inlined into the message on purpose: Pumpkin's non-TTY
             // "simple logger" prints the message text only and drops every structured

@@ -100,6 +100,10 @@ pub const PROTOCOL_MAJOR: u64 = 2;
 /// `voice.clientModMinVersion` default (`VoiceServerConfig.java:168`).
 pub const MIN_CLIENT_VERSION: &str = "2.0.0";
 
+/// `voice.defaultLanguage` default (`VoiceServerConfig.java`, `ServerTranslator`'s own
+/// fallback locale): the answer to a locale this server does not ship.
+pub const DEFAULT_LANGUAGE: &str = "en_us";
+
 /// `ProximityServerActivation` as it goes on the wire.
 ///
 /// `id` is derived from the name, never transmitted: `generateId("proximity")` is the MD5
@@ -157,6 +161,21 @@ pub struct ServerConfig {
     max_extra_audio_broadcast_distance: i32,
     /// `voice.notifications().unmuted`, default `true` (see the mute sweep in `tick.rs`).
     notify_unmuted: bool,
+    /// `voice.notifications().muted`, default `true` (see `/vmute` in `commands.rs`).
+    notify_muted: bool,
+    /// `voice.defaultLanguage`, default [`DEFAULT_LANGUAGE`]: the locale an unknown
+    /// or empty `LanguageRequestPacket` is answered in, upstream's translator
+    /// fallback (when `forced_language` is empty).
+    default_language: String,
+    /// `voice.forcedLanguage`, default empty: when set, *every* client is answered
+    /// in this locale no matter what it asked for, and the fallback becomes that
+    /// same locale (`BaseVoiceServer.java:248-253`).
+    forced_language: String,
+    /// `voice.clientModMinVersion`, default [`MIN_CLIENT_VERSION`]: the floor a
+    /// connecting client's version must clear; applied the way upstream does, only
+    /// to clients that are themselves at least 2.1.0
+    /// (`PlayerChannelHandler.java:76-82`).
+    client_mod_min_version: String,
 }
 
 impl ServerConfig {
@@ -171,6 +190,10 @@ impl ServerConfig {
             default_distance: PROXIMITY_DEFAULT_DISTANCE,
             max_extra_audio_broadcast_distance: MAX_EXTRA_AUDIO_BROADCAST_DISTANCE,
             notify_unmuted: true,
+            notify_muted: true,
+            default_language: DEFAULT_LANGUAGE.to_string(),
+            forced_language: String::new(),
+            client_mod_min_version: MIN_CLIENT_VERSION.to_string(),
         }
     }
 
@@ -188,6 +211,10 @@ impl ServerConfig {
             default_distance: plugin.default_distance,
             max_extra_audio_broadcast_distance: plugin.max_extra_audio_broadcast_distance,
             notify_unmuted: plugin.notify_unmuted,
+            notify_muted: plugin.notify_muted,
+            default_language: plugin.default_language.clone(),
+            forced_language: plugin.forced_language.clone(),
+            client_mod_min_version: plugin.client_mod_min_version.clone(),
         }
     }
 
@@ -219,6 +246,32 @@ impl ServerConfig {
     #[must_use]
     pub fn notify_unmuted(&self) -> bool {
         self.notify_unmuted
+    }
+
+    /// Whether `/vmute` tells the muted player, upstream `notifications().muted()`.
+    #[must_use]
+    pub fn notify_muted(&self) -> bool {
+        self.notify_muted
+    }
+
+    /// The fallback locale a `LanguageRequestPacket` is answered in, upstream
+    /// `defaultLanguage` (ignored while `forced_language` is set).
+    #[must_use]
+    pub fn default_language(&self) -> &str {
+        &self.default_language
+    }
+
+    /// The locale every client is answered in when non-empty, upstream
+    /// `forcedLanguage`.
+    #[must_use]
+    pub fn forced_language(&self) -> &str {
+        &self.forced_language
+    }
+
+    /// The minimum client version floor, upstream `clientModMinVersion`.
+    #[must_use]
+    pub fn client_mod_min_version(&self) -> &str {
+        &self.client_mod_min_version
     }
 
     /// The activation catalogue this server offers.
@@ -343,7 +396,15 @@ impl std::fmt::Display for Version {
 ///
 /// Returns `Err` with the reason to log; upstream sends a chat suggestion to the player in
 /// both rejection cases and never replies with a `ConnectionPacket`.
-pub fn client_version_is_supported(client_version: &str) -> Result<Version, String> {
+///
+/// `configured_min` is `voice.clientModMinVersion` when the operator overrode it. Like
+/// upstream (`PlayerChannelHandler.java:76-82`), it only replaces the built-in 2.0.0 floor
+/// for clients that are themselves at least 2.1.0, so an operator can never accidentally
+/// lock out the older 2.0.x clients still in the wild.
+pub fn client_version_is_supported(
+    client_version: &str,
+    configured_min: Option<&str>,
+) -> Result<Version, String> {
     let Some(client) = Version::parse(client_version) else {
         return Err(format!(
             "the client reported version {client_version:?}, which is not a semantic version"
@@ -354,11 +415,24 @@ pub fn client_version_is_supported(client_version: &str) -> Result<Version, Stri
             "client version {client} does not match server major version {PROTOCOL_MAJOR}"
         ));
     }
-    let min = Version::parse(MIN_CLIENT_VERSION).unwrap_or(Version {
+    let built_in_min = Version::parse(MIN_CLIENT_VERSION).unwrap_or(Version {
         major: PROTOCOL_MAJOR,
         minor: 0,
         patch: 0,
     });
+    let client_is_modern = client
+        >= Version {
+            major: PROTOCOL_MAJOR,
+            minor: 1,
+            patch: 0,
+        };
+    let min = if client_is_modern {
+        configured_min
+            .and_then(Version::parse)
+            .unwrap_or(built_in_min)
+    } else {
+        built_in_min
+    };
     if client < min {
         return Err(format!(
             "client version {client} is older than the minimum {min}"
@@ -441,9 +515,25 @@ pub const DEFAULT_CONFIG_TOML: &str = "# Plasmo Voice server configuration
 # max_extra_audio_broadcast_distance = 16
 #
 # Whether the voice server tells a player when an automatically expired mute
-# lifts (upstream: voice.notifications.unmuted, default true). The /vmute and
-# /vunmute commands always announce their own changes.
+# lifts and whether /vmute or /vunmute announce the change to the affected
+# player (upstream: voice.notifications.unmuted / muted, default true).
 # notify_unmuted = true
+# notify_muted = true
+#
+# The locale a LanguageRequestPacket is answered in when the client asks for a
+# locale this server does not ship (upstream: voice.defaultLanguage, default
+# \"en_us\").
+# default_language = \"en_us\"
+#
+# When non-empty, every client is answered in this locale no matter what it asks
+# for (upstream: voice.forcedLanguage, default empty).
+# forced_language = \"\"
+#
+# Minimum mod version for a client to connect. Only applied to clients that are
+# themselves at least 2.1.0, mirroring upstream PlayerChannelHandler; a client
+# below the minimum is not connected to the voice server.
+# (upstream: voice.clientModMinVersion, default \"2.0.0\")
+# client_mod_min_version = \"2.0.0\"
 ";
 
 /// Server-runner settings read from `config.toml` in the data folder.
@@ -491,6 +581,22 @@ pub struct PluginConfig {
     /// `voice.notifications().unmuted` (`VoiceServerConfig.java:272`), default
     /// `true`: whether an automatically expired mute is announced to the player.
     pub notify_unmuted: bool,
+    /// `voice.notifications().muted` (`VoiceServerConfig.java:270`), default
+    /// `true`: whether `/vmute` announces the mute to the muted player.
+    pub notify_muted: bool,
+    /// `voice.defaultLanguage` (`VoiceServerConfig.java`), default
+    /// [`DEFAULT_LANGUAGE`]: the fallback locale a `LanguageRequestPacket` is
+    /// answered in, used while `forced_language` is empty.
+    pub default_language: String,
+    /// `voice.forcedLanguage` (`VoiceServerConfig.java`), default empty: when
+    /// non-empty, every client is answered in this locale regardless of its request
+    /// (`BaseVoiceServer.java:248-253`).
+    pub forced_language: String,
+    /// `voice.clientModMinVersion` (`VoiceServerConfig.java:168`), default
+    /// [`MIN_CLIENT_VERSION`]: the floor a connecting client's reported mod version
+    /// must clear; applied to clients that are at least 2.1.0, mirroring
+    /// `PlayerChannelHandler.java:76-82`.
+    pub client_mod_min_version: String,
 }
 
 impl Default for PluginConfig {
@@ -506,6 +612,10 @@ impl Default for PluginConfig {
             default_distance: PROXIMITY_DEFAULT_DISTANCE,
             max_extra_audio_broadcast_distance: MAX_EXTRA_AUDIO_BROADCAST_DISTANCE,
             notify_unmuted: true,
+            notify_muted: true,
+            default_language: DEFAULT_LANGUAGE.to_string(),
+            forced_language: String::new(),
+            client_mod_min_version: MIN_CLIENT_VERSION.to_string(),
         }
     }
 }
@@ -651,6 +761,32 @@ impl PluginConfig {
                         )
                     })?;
                 }
+                "notify_muted" => {
+                    config.notify_muted = value.parse().map_err(|error| {
+                        format!(
+                            "config key 'notify_muted' value {value:?} is not a boolean: \
+                             {error}"
+                        )
+                    })?;
+                }
+                "default_language" => {
+                    config.default_language = crate::state::unquote(&value);
+                }
+                "forced_language" => {
+                    config.forced_language = crate::state::unquote(&value);
+                }
+                "client_mod_min_version" => {
+                    config.client_mod_min_version = crate::state::unquote(&value);
+                    // The operator may raise or lower the floor; a value that does not
+                    // parse is refused here rather than at the handshake.
+                    if Version::parse(&config.client_mod_min_version).is_none() {
+                        return Err(format!(
+                            "config key 'client_mod_min_version' value {:?} is not a \
+                             semantic version",
+                            config.client_mod_min_version
+                        ));
+                    }
+                }
                 _ => unknown.push(key),
             }
         }
@@ -677,7 +813,8 @@ impl PluginConfig {
             "port = {}\nkeep_alive_timeout_ms = {}\nadvertised_ip = {}\n\
              max_datagrams_per_tick = {}\nsample_rate = {}\nmtu_size = {}\ndistances = {}\n\
              default_distance = {}\nmax_extra_audio_broadcast_distance = {}\n\
-             notify_unmuted = {}\n",
+             notify_unmuted = {}\nnotify_muted = {}\ndefault_language = {}\n\
+             forced_language = {}\nclient_mod_min_version = {}\n",
             self.port,
             self.keep_alive_timeout_ms,
             render_string(&self.advertised_ip, "\"0.0.0.0\""),
@@ -688,6 +825,18 @@ impl PluginConfig {
             self.default_distance,
             self.max_extra_audio_broadcast_distance,
             self.notify_unmuted,
+            self.notify_muted,
+            render_string(&self.default_language, &format!("\"{DEFAULT_LANGUAGE}\"")),
+            if self.forced_language.is_empty() {
+                "\"\"".to_string()
+            } else {
+                format!("{:?}", self.forced_language)
+            },
+            if self.client_mod_min_version == MIN_CLIENT_VERSION {
+                format!("{MIN_CLIENT_VERSION:?}")
+            } else {
+                format!("{:?}", self.client_mod_min_version)
+            },
         ));
         out
     }
@@ -755,7 +904,8 @@ mod plugin_config_tests {
             "port = 24424\nkeep_alive_timeout_ms = 30000\nadvertised_ip = \"mc.example.com\"\n\
              max_datagrams_per_tick = 512\nsample_rate = 24000\nmtu_size = 500\ndistances = \
              32,8,16\ndefault_distance = 8\nmax_extra_audio_broadcast_distance = 32\n\
-             notify_unmuted = false\n",
+             notify_unmuted = false\nnotify_muted = false\ndefault_language = \"zh_cn\"\n\
+             forced_language = \"ru_ru\"\nclient_mod_min_version = \"2.1.7\"\n",
         )
         .expect("all keys parse");
         assert_eq!(config.port, 24424);
@@ -772,6 +922,17 @@ mod plugin_config_tests {
         assert_eq!(config.default_distance, 8);
         assert_eq!(config.max_extra_audio_broadcast_distance, 32);
         assert!(!config.notify_unmuted);
+        assert!(!config.notify_muted);
+        assert_eq!(config.default_language, "zh_cn");
+        assert_eq!(config.forced_language, "ru_ru");
+        assert_eq!(config.client_mod_min_version, "2.1.7");
+    }
+
+    #[test]
+    fn a_non_semantic_client_mod_min_version_is_rejected() {
+        let error = PluginConfig::from_toml("client_mod_min_version = \"latest\"\n")
+            .expect_err("the floor must be a semantic version");
+        assert!(error.contains("client_mod_min_version"), "{error}");
     }
 
     #[test]
@@ -1006,13 +1167,19 @@ mod tests {
         assert_eq!(Version::parse("two"), None);
         assert_eq!(Version::parse("2.1.7.9"), None);
 
-        assert!(client_version_is_supported("2.1.7").is_ok());
-        assert!(client_version_is_supported("2.0.0").is_ok());
+        assert!(client_version_is_supported("2.1.7", None).is_ok());
+        assert!(client_version_is_supported("2.0.0", None).is_ok());
         // Major mismatch: upstream refuses and only suggests a version.
-        assert!(client_version_is_supported("3.0.0").is_err());
+        assert!(client_version_is_supported("3.0.0", None).is_err());
         // Below the 2.0.0 minimum.
-        assert!(client_version_is_supported("1.9.9").is_err());
-        assert!(client_version_is_supported("garbage").is_err());
+        assert!(client_version_is_supported("1.9.9", None).is_err());
+        assert!(client_version_is_supported("garbage", None).is_err());
+        // The configured floor only bites clients at least 2.1.0, exactly like
+        // upstream `PlayerChannelHandler.java:76-82`.
+        assert!(client_version_is_supported("2.1.7", Some("2.1.7")).is_ok());
+        assert!(client_version_is_supported("2.1.6", Some("2.1.7")).is_err());
+        assert!(client_version_is_supported("2.0.5", Some("2.1.7")).is_ok());
+        assert!(client_version_is_supported("2.1.6", Some("garbage")).is_ok());
     }
 
     #[test]

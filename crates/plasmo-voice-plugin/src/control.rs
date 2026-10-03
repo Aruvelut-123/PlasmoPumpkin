@@ -176,7 +176,9 @@ impl ControlPlane {
             TcpPacket::SourceInfoRequest(request) => {
                 self.on_source_info_request(server, player, &request)
             }
-            TcpPacket::LanguageRequest(request) => self.on_language_request(player, &request),
+            TcpPacket::LanguageRequest(request) => {
+                self.on_language_request(server, player, &request)
+            }
             other => {
                 // Everything left in the SERVER direction is a packet this server
                 // deliberately does not answer. `decode` already dropped unknown ids and
@@ -207,7 +209,10 @@ impl ControlPlane {
         // Upstream refuses a client whose major version differs, or that is older than
         // `clientModMinVersion`, and answers neither with a chat message (which a plugin
         // guest cannot send) nor a `ConnectionPacket`.
-        if let Err(reason) = client_version_is_supported(&info.version) {
+        if let Err(reason) = client_version_is_supported(
+            &info.version,
+            Some(server.config().client_mod_min_version()),
+        ) {
             tracing::warn!(%player, version = %info.version, %reason, "refusing a voice client");
             return Vec::new();
         }
@@ -368,16 +373,28 @@ impl ControlPlane {
     /// `LanguageRequestPacket` — upstream answers with its translated strings.
     ///
     /// The table comes from [`crate::language`]: the requested locale, lowercased, with
-    /// `en_us` filling anything it does not carry. The client stores it and translates its
-    /// own GUI through it, which is the only way the volume tab's source-line label can
-    /// read "Proximity" instead of `pv.activation.proximity`.
-    fn on_language_request(&self, player: Uuid, request: &LanguageRequestPacket) -> Vec<Outbound> {
+    /// `en_us` filling anything it does not carry. A configured `forced_language`
+    /// short-circuits the request (every client gets that locale), and
+    /// `default_language` replaces the built-in fallback. The client stores the table
+    /// and translates its own GUI through it, which is the only way the volume tab's
+    /// source-line label can read "Proximity" instead of `pv.activation.proximity`.
+    fn on_language_request(
+        &self,
+        server: &VoiceServer,
+        player: Uuid,
+        request: &LanguageRequestPacket,
+    ) -> Vec<Outbound> {
+        let config = server.config();
         // The client asks for its own locale; `language::client_language` lowercases it,
-        // falls back to `en_us` for a locale this server does not ship, and flattens the
-        // `client` scope into the `pv.*` keys the client looks up. An empty map here is not
+        // applies the forced/default policy, and flattens the `client` scope into the
+        // `pv.*` keys the client looks up. An empty map here is not
         // "no translations needed" — it is what makes the client print the raw
         // `pv.activation.proximity` in the volume tab.
-        let language = crate::language::client_language(&request.language);
+        let language = crate::language::client_language(
+            &request.language,
+            config.forced_language(),
+            config.default_language(),
+        );
         tracing::info!(
             %player,
             requested = %request.language,

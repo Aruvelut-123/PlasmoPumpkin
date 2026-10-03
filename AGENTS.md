@@ -315,7 +315,9 @@ fixing the disagreement is part of your change.
    and source line exist, and the plugin's own `config.toml` covers only the
    server-runner knobs (`port`, `keep_alive_timeout_ms`, `advertised_ip`,
    `max_datagrams_per_tick`, `sample_rate`, `mtu_size`, `distances`,
-   `default_distance`, `max_extra_audio_broadcast_distance`, `notify_unmuted`);
+   `default_distance`, `max_extra_audio_broadcast_distance`, `notify_unmuted`,
+   `notify_muted`, `default_language`, `forced_language`,
+   `client_mod_min_version`);
    permissions **are** enforced (`pv.mute`/`pv.unmute`/`pv.mutelist`, op by
    default, double-checked inside the handlers), both target commands take
    `@`-selectors, and the client-side duration suggestions are not mirrored;
