@@ -162,10 +162,10 @@ impl CommandHandler for MuteHandler {
                 continue;
             }
             broadcast_player_info(&player_id);
-            if self.notify {
-                if let Some(player) = server.get_player_by_uuid(wit_uuid(player_id)) {
-                    player.send_system_message(TextComponent::text(&notice), false);
-                }
+            if self.notify
+                && let Some(player) = server.get_player_by_uuid(wit_uuid(player_id))
+            {
+                player.send_system_message(TextComponent::text(&notice), false);
             }
             match expiry {
                 None => feedback(&sender, format!("{name} muted permanently")),
