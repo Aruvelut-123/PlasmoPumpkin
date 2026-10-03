@@ -119,8 +119,9 @@ The connect → config → relay path works end to end, but this is not full ups
 * Only the **proximity** activation and source line exist, and the plugin's own
   `config.toml` covers only the server-runner knobs (`port`, `keep_alive_timeout_ms`,
   `advertised_ip`, `max_datagrams_per_tick`, `sample_rate`, `mtu_size`, `distances`,
-  `default_distance`, `max_extra_audio_broadcast_distance`, `notify_unmuted`) — there
-  is no per-world voice config yet.
+  `default_distance`, `max_extra_audio_broadcast_distance`, `notify_unmuted`,
+  `notify_muted`, `default_language`, `forced_language`, `client_mod_min_version`) —
+  there is no per-world voice config yet.
 * **Vanish is honored**: a periodic `canSee` sweep (once a second) mirrors the host's
   hide/show state into the relay, and a vanished pair goes silent in **both** directions.
 * **Mutes are enforced**: `/vmute`, `/vunmute` and `/vmutelist` are gated on the
