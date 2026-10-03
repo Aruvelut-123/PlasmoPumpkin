@@ -312,12 +312,16 @@ fixing the disagreement is part of your change.
    `lib.rs` **outside** the `cfg` gate.
 3. Known gaps, in the order they matter (the user-facing summary is `README.md` →
    "Limitations"): only the proximity activation
-   and source line exist, and the plugin's own `config.toml` covers only the
+   and source line exist — which is exactly upstream's zero-addon surface: the
+   server registers just `ProximityServerActivation` (only activation upstream
+   creates; "global"/addon activations come from the Java addon API, which this
+   plugin has no host for) — and the plugin's own `config.toml` covers only the
    server-runner knobs (`port`, `keep_alive_timeout_ms`, `advertised_ip`,
    `max_datagrams_per_tick`, `sample_rate`, `mtu_size`, `distances`,
    `default_distance`, `max_extra_audio_broadcast_distance`, `notify_unmuted`,
    `notify_muted`, `default_language`, `forced_language`,
-   `client_mod_min_version`);
+   `client_mod_min_version`), applied globally like upstream's (upstream's
+   `VoiceServerConfig` has no per-world section either);
    permissions **are** enforced (`pv.mute`/`pv.unmute`/`pv.mutelist`, op by
    default, double-checked inside the handlers), both target commands take
    `@`-selectors, and the client-side duration suggestions are not mirrored;
