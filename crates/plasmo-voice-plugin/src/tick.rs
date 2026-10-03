@@ -36,6 +36,7 @@ use pumpkin_plugin_api::text::TextComponent;
 
 use crate::channel::{self, wit_uuid};
 use crate::commands::broadcast_player_info;
+use crate::config::ALLOW_FREECAM;
 use crate::mute;
 use crate::runtime::with_runtime;
 use uuid::Uuid;
@@ -45,6 +46,18 @@ use uuid::Uuid;
 /// 20 ticks ≈ 1 s at the default 20 Hz, which is fine for a visibility mirror:
 /// the host's `hidePlayer`/`showPlayer` calls take effect on the next sync.
 const VISIBILITY_SYNC_TICKS: i32 = 20;
+
+/// How often every connected voice player's permissions are re-read from the host, in
+/// server ticks.
+///
+/// Upstream re-sends `ConfigPlayerInfoPacket` on a permission-change *event*
+/// (`onPermissionUpdate`); Pumpkin 0.2.0 has no such event, so the pump polls
+/// `has_permission` on the same cadence as the visibility mirror (~1 s at 20 Hz).
+/// The cost is one host round-trip per connected player per sweep — the same shape
+/// as [`sync_visibility`] — and a changed value simply produces one more
+/// `ConfigPlayerInfo` datagram than upstream would. Freecam (the only permission
+/// this server synchronises) changes rarely, so in practice the sweep is silent.
+const PERMISSION_SYNC_TICKS: i32 = VISIBILITY_SYNC_TICKS;
 
 /// How often every voice player's live position is re-read from the host, in
 /// server ticks.
@@ -96,6 +109,12 @@ impl EventHandler<ServerTickStartEvent> for TickPump {
         if event.tick % VISIBILITY_SYNC_TICKS == 0 {
             sync_visibility(&server);
         }
+        // Re-read each connected player's permissions on the same cadence, re-sending
+        // ConfigPlayerInfo when a value changed (upstream's onPermissionUpdate, reached
+        // by polling because Pumpkin has no permission-change event).
+        if event.tick % PERMISSION_SYNC_TICKS == 0 {
+            sync_permissions(&server);
+        }
         // Lift expired temporary mutes on the same schedule as upstream
         // (`VoiceMuteManager.tick()` every 5 s). The pump then flushes the
         // PlayerInfoUpdate broadcasts below, like a `/vunmute` would.
@@ -111,6 +130,53 @@ impl EventHandler<ServerTickStartEvent> for TickPump {
             tracing::trace!(tick = event.tick, received, sent, "voice tick");
         }
         event
+    }
+}
+
+/// Re-reads the host's per-player `has_permission` and re-sends `ConfigPlayerInfo`
+/// to any player whose snapshot changed.
+///
+/// Upstream announces permissions by event (`onPermissionUpdate`); Pumpkin 0.2.0
+/// exposes no permission-change event, so this sweep is the guest's way to the
+/// same truth — a poll on the same cadence as [`sync_visibility`]. The host owns
+/// the permission values (its `has-permission` state); the guest can only observe
+/// them one round-trip at a time, so the ids are snapshotted inside the lock and
+/// each host query happens outside it, like the visibility sweep. A player with
+/// no snapshot yet (just connected, `None`) counts as changed, so the *real*
+/// value reaches the client even when registration guessed the default `true`.
+fn sync_permissions(server: &Server) {
+    // All registered players, not just UDP-connected ones: upstream's
+    // `onPermissionUpdate` addresses any online player (`player.sendPacket`),
+    // so a listener who has not opened a voice connection yet still gets the
+    // corrected config ahead of their first `ConfigPlayerInfo`-free burst.
+    let ids = with_runtime(|runtime| {
+        runtime
+            .protocol()
+            .map_or_else(Vec::new, |protocol| protocol.registered_player_ids())
+    });
+    for player_id in ids {
+        let Some(player) = server.get_player_by_uuid(wit_uuid(player_id)) else {
+            continue;
+        };
+        let permissions = vec![(
+            ALLOW_FREECAM.to_string(),
+            player.has_permission(ALLOW_FREECAM),
+        )];
+        with_runtime(|runtime| {
+            let packets = {
+                let Some(protocol) = runtime.protocol_mut() else {
+                    return;
+                };
+                if protocol.announced_permissions(&player_id) == Some(&permissions) {
+                    return;
+                }
+                protocol.set_announced_permissions(player_id, permissions.clone());
+                protocol.control().permission_update(player_id, permissions)
+            };
+            for packet in packets {
+                runtime.push_control(packet);
+            }
+        });
     }
 }
 

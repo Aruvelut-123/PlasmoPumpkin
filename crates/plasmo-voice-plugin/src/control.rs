@@ -27,11 +27,11 @@
 //! burst, which is why the joiner receives its own id 8.
 
 use plasmo_voice_core::wire::{
-    ConnectionPacket, DistanceVisualizePacket, LanguagePacket, LanguageRequestPacket,
-    PlayerActivationDistancesPacket, PlayerAudioEndPacket, PlayerDisconnectPacket,
-    PlayerInfoPacket, PlayerInfoRequestPacket, PlayerInfoUpdatePacket, PlayerListPacket,
-    PlayerStatePacket, SelfSourceInfoPacket, SourceAudioEndPacket, SourceInfoPacket,
-    SourceInfoRequestPacket, TcpPacket,
+    ConfigPlayerInfoPacket, ConnectionPacket, DistanceVisualizePacket, LanguagePacket,
+    LanguageRequestPacket, PlayerActivationDistancesPacket, PlayerAudioEndPacket,
+    PlayerDisconnectPacket, PlayerInfoPacket, PlayerInfoRequestPacket, PlayerInfoUpdatePacket,
+    PlayerListPacket, PlayerStatePacket, SelfSourceInfoPacket, SourceAudioEndPacket,
+    SourceInfoPacket, SourceInfoRequestPacket, TcpPacket,
 };
 use plasmo_voice_core::{PacketDirection, TcpCodec};
 use uuid::Uuid;
@@ -463,6 +463,26 @@ impl ControlPlane {
         }
 
         out
+    }
+
+    /// Re-sends one player's permission snapshot as a `ConfigPlayerInfoPacket`.
+    ///
+    /// Upstream fires this when a player's permissions change mid-session
+    /// (`BaseVoiceServer.onPermissionUpdate` → `sendConfigInfo` with just the
+    /// changed key). Pumpkin exposes no permission-change event, so the tick pump
+    /// polls `has_permission` and calls this exactly when the poll differs from
+    /// the last announced snapshot — the event-driven behaviour, reached by
+    /// polling. The client merges the packet into its own config (`ConfigPacket`
+    /// is an extension of `ConfigPlayerInfoPacket`), so sending only the changed
+    /// key is enough; a full snapshot is sent too and is just as valid.
+    #[must_use]
+    pub fn permission_update(
+        &self,
+        player: Uuid,
+        permissions: Vec<(String, bool)>,
+    ) -> Vec<Outbound> {
+        let packet = TcpPacket::ConfigPlayerInfo(ConfigPlayerInfoPacket { permissions });
+        vec![Outbound::to_player(player, self.encode(&packet))]
     }
 
     /// A UDP connection went away (timeout, or the client replaced it).
@@ -1050,6 +1070,22 @@ mod tests {
                 .decode(&bytes, PacketDirection::Server)
                 .expect("decode ok")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn a_permission_update_tells_only_that_player_its_new_snapshot() {
+        let plane = ControlPlane::new(SERVER_ID);
+        let permissions = vec![("pv.allow_freecam".to_string(), false)];
+        let messages = plane.permission_update(ALICE, permissions.clone());
+        assert_eq!(messages.len(), 1, "one targeted ConfigPlayerInfo");
+        let message = &messages[0];
+        assert_eq!(message.to, Some(ALICE));
+        assert_eq!(id_of(&message.payload), 4, "ConfigPlayerInfo is 0x04");
+        assert_eq!(
+            decode(&message.payload),
+            TcpPacket::ConfigPlayerInfo(ConfigPlayerInfoPacket { permissions }),
+            "the snapshot round-trips unchanged"
         );
     }
 }

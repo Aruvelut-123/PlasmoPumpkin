@@ -210,6 +210,14 @@ pub struct VoiceServer {
     /// relay mutes a pair in **both** directions — a vanished player is fully
     /// gone from the voice world, not just inaudible.
     hidden_players: HashSet<(Uuid, Uuid)>,
+    /// The permission snapshot each connected player was last told about.
+    ///
+    /// Upstream re-sends `ConfigPlayerInfoPacket` when a player's permissions
+    /// change mid-session (its `onPermissionUpdate`); Pumpkin exposes no
+    /// permission-change event, so the tick pump polls `has_permission` on a
+    /// schedule and this map remembers the last value it announced — a change
+    /// is exactly a difference between the poll and this snapshot.
+    permission_announced: HashMap<Uuid, Vec<(String, bool)>>,
     /// Folded into minted secrets so two players registered in the same
     /// millisecond cannot collide.
     secret_counter: u64,
@@ -260,6 +268,7 @@ impl VoiceServer {
             registered: HashMap::new(),
             player_by_secret: HashMap::new(),
             hidden_players: HashSet::new(),
+            permission_announced: HashMap::new(),
             secret_counter: 0,
             server_secret,
             aes_key,
@@ -538,7 +547,23 @@ impl VoiceServer {
         let registered = self.registered.remove(player_id)?;
         self.player_by_secret.remove(&registered.secret);
         self.remove_connection(&registered.secret);
+        self.permission_announced.remove(player_id);
         Some(registered.secret)
+    }
+
+    /// The permission snapshot `player_id` was last told about, if any.
+    ///
+    /// `None` means "never announced": the tick pump treats the first poll of a
+    /// connected player as a change so its real permissions reach the client even
+    /// when they were only guessed (the default `true`) at registration time.
+    #[must_use]
+    pub fn announced_permissions(&self, player_id: &Uuid) -> Option<&Vec<(String, bool)>> {
+        self.permission_announced.get(player_id)
+    }
+
+    /// Remembers the permission snapshot `player_id` was just told about.
+    pub fn set_announced_permissions(&mut self, player_id: Uuid, permissions: Vec<(String, bool)>) {
+        self.permission_announced.insert(player_id, permissions);
     }
 
     /// The secret registered for `player_id`, if any.
@@ -1477,6 +1502,28 @@ mod tests {
         let handled = server.handle_datagram("1.1.1.1:10", &wire);
         assert!(handled.outgoing.is_empty());
         assert_eq!(server.dropped(), 1);
+    }
+
+    #[test]
+    fn a_player_drops_its_announced_permissions_when_unregistered() {
+        let mut server = server();
+        let player = Uuid::from_u128(0xa11ce);
+        let secret = server.register_player(player, Some("alice".into()));
+        server.add_connection(secret, "1.1.1.1:10".to_string(), Some(player));
+
+        // A connected player has no snapshot until the tick pump announces one.
+        assert!(server.announced_permissions(&player).is_none());
+        server.set_announced_permissions(player, vec![("pv.allow_freecam".into(), false)]);
+        assert_eq!(
+            server.announced_permissions(&player),
+            Some(&vec![("pv.allow_freecam".into(), false)])
+        );
+
+        server.unregister_player(&player);
+        assert!(
+            server.announced_permissions(&player).is_none(),
+            "the stale snapshot goes with the player"
+        );
     }
 
     #[test]

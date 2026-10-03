@@ -326,8 +326,11 @@ fixing the disagreement is part of your change.
    vanished pair in both directions; positions are **live** — `tick.rs` re-reads
    every registered player's position from the host every tick, with the
    `PlayerMoveEvent` handler in `channel.rs` (`MoveHandler`) kept as a sub-tick
-   hint — and `ConfigPlayerInfo` is not re-sent when a player's permissions change
-   mid-session (`AnimatedActionBar` and the addon/entity/static source variants are
+   hint — and permissions are **live** too: `tick.rs` re-reads every registered
+   player's `has_permission` once a second and re-sends `ConfigPlayerInfo`
+   (`control.rs`'s `permission_update`) exactly when the value changes — the
+   upstream event (`onPermissionUpdate`) reached by polling, since Pumpkin
+   exposes no permission-change event (`AnimatedActionBar` and the addon/entity/static source variants are
    not sent either — upstream's own server never sends the former and never creates
    the latter; `DistanceVisualize` **is**, on
    proximity distance changes — see `control.rs`'s `on_activation_distances`). Do not

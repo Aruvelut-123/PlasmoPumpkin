@@ -131,9 +131,10 @@ The connect → config → relay path works end to end, but this is not full ups
 * **Positions are live**: the relay re-reads every voice player's position from the
   host on a per-tick schedule (the move event is only a sub-tick hint), so distance
   filtering never depends on events arriving.
-* **Config-player-info updates are not pushed mid-session**: the permission map is
-  sent once in `ConfigPacket` (upstream's default `pv.allow_freecam: true`), and
-  `ConfigPlayerInfo` is not re-sent when a player's permissions change. Only
+* **Permissions are live**: `ConfigPacket` still carries upstream's default
+  `pv.allow_freecam: true`, but the server re-reads the host's real permission
+  every second and re-sends `ConfigPlayerInfo` as soon as it differs — a
+  mid-session change reaches the client the way upstream's event would. Only
   **player** voice sources exist — no addon/entity/static variants, like upstream's
   own server. (`DistanceVisualize` **is** sent on proximity distance changes.)
 * No server-side jitter buffer, reordering or packet-loss concealment — frames are
