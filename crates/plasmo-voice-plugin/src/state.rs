@@ -535,7 +535,7 @@ fn escape(s: &str) -> String {
 /// already covers the characters the persisted values can realistically hold
 /// (UUIDs, hex, version strings), and anything exotic simply passes through,
 /// which keeps the writer and reader symmetric.
-fn escape_toml(s: &str) -> String {
+pub(crate) fn escape_toml(s: &str) -> String {
     escape(s)
 }
 

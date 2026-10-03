@@ -55,6 +55,25 @@ pub const PROXIMITY_DEFAULT_DISTANCE: i32 = 16;
 /// (`VoiceServerConfig.java:137`).
 pub const MAX_EXTRA_AUDIO_BROADCAST_DISTANCE: i32 = 16;
 
+/// `voice.sampleRate` valid range (`VoiceServerConfig.java:140-144`).
+pub const SAMPLE_RATE_MIN: i32 = 8_000;
+/// `voice.sampleRate` valid range (`VoiceServerConfig.java:140-144`).
+pub const SAMPLE_RATE_MAX: i32 = 48_000;
+
+/// `voice.mtuSize` valid range (`VoiceServerConfig.java:154`).
+pub const MTU_SIZE_MIN: i32 = 128;
+/// `voice.mtuSize` valid range (`VoiceServerConfig.java:154`).
+pub const MTU_SIZE_MAX: i32 = 5_000;
+
+/// The largest proximity distance an operator may configure. Distances are
+/// straight-line blocks; anything past a player render distance is already
+/// inaudible, so a generous cap only catches typos.
+pub const MAX_PROXIMITY_DISTANCE: i32 = 1_000;
+
+/// `VoicePlayer.visualizeDistance(int)` default colour: the green used for a
+/// proximity circle (`VoicePlayer.java:96`).
+pub const PROXIMITY_VISUALIZE_COLOR: i32 = 0x00a000;
+
 /// `ProximityServerActivation` translation key (`ProximityServerActivation.kt:30`).
 pub const PROXIMITY_TRANSLATION: &str = "pv.activation.proximity";
 
@@ -117,35 +136,59 @@ pub fn proximity_source_line() -> VoiceSourceLine {
     }
 }
 
-/// `voice.capture` as it goes on the wire.
-pub fn capture_info() -> CaptureInfo {
-    CaptureInfo {
-        sample_rate: SAMPLE_RATE,
-        mtu_size: MTU_SIZE,
-        encoder_info: Some(CodecInfo {
-            name: "opus".to_string(),
-            params: vec![
-                ("mode".to_string(), OPUS_MODE.to_string()),
-                ("bitrate".to_string(), OPUS_BITRATE.to_string()),
-            ],
-        }),
-    }
-}
-
 /// The server's voice configuration, as far as the wire is concerned.
 ///
-/// Deliberately tiny: everything a client is told is derived from the server id it is
-/// paired with, so there is exactly one value that can drift.
+/// Deliberately small: everything a client is told either comes from the server id it is
+/// paired with or from the handful of wire-facing knobs an operator may override in
+/// `config.toml`. Overrides are validated at parse time (see [`PluginConfig::from_toml`]),
+/// so a `ServerConfig` built from a parsed file can only ever carry valid values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
     server_id: Uuid,
+    /// `voice.sampleRate` (`VoiceServerConfig.java:140`), default [`SAMPLE_RATE`].
+    sample_rate: i32,
+    /// `voice.mtuSize` (`VoiceServerConfig.java:154`), default [`MTU_SIZE`].
+    mtu_size: i32,
+    /// `voice.proximity().distances`, ascending, default [`PROXIMITY_DISTANCES`].
+    distances: Vec<i32>,
+    /// `voice.proximity().defaultDistance`, default [`PROXIMITY_DEFAULT_DISTANCE`].
+    default_distance: i32,
+    /// `voice.maxExtraAudioBroadcastDistance`, default [`MAX_EXTRA_AUDIO_BROADCAST_DISTANCE`].
+    max_extra_audio_broadcast_distance: i32,
+    /// `voice.notifications().unmuted`, default `true` (see the mute sweep in `tick.rs`).
+    notify_unmuted: bool,
 }
 
 impl ServerConfig {
-    /// Pairs a configuration with the persisted server id.
+    /// Pairs a configuration with the persisted server id, on the upstream defaults.
     #[must_use]
     pub fn new(server_id: Uuid) -> Self {
-        Self { server_id }
+        Self {
+            server_id,
+            sample_rate: SAMPLE_RATE,
+            mtu_size: MTU_SIZE,
+            distances: PROXIMITY_DISTANCES.to_vec(),
+            default_distance: PROXIMITY_DEFAULT_DISTANCE,
+            max_extra_audio_broadcast_distance: MAX_EXTRA_AUDIO_BROADCAST_DISTANCE,
+            notify_unmuted: true,
+        }
+    }
+
+    /// Builds the configuration from a parsed `config.toml`.
+    ///
+    /// Every key in [`PluginConfig`] carries a default, so fields the operator
+    /// never set simply keep the upstream value.
+    #[must_use]
+    pub fn new_with_overrides(server_id: Uuid, plugin: &PluginConfig) -> Self {
+        Self {
+            server_id,
+            sample_rate: plugin.sample_rate,
+            mtu_size: plugin.mtu_size,
+            distances: plugin.distances.clone(),
+            default_distance: plugin.default_distance,
+            max_extra_audio_broadcast_distance: plugin.max_extra_audio_broadcast_distance,
+            notify_unmuted: plugin.notify_unmuted,
+        }
     }
 
     /// `ConfigPacket.serverId`.
@@ -154,10 +197,61 @@ impl ServerConfig {
         self.server_id
     }
 
+    /// `voice.sampleRate` as advertised in the `ConfigPacket`.
+    #[must_use]
+    pub fn sample_rate(&self) -> i32 {
+        self.sample_rate
+    }
+
+    /// `voice.mtuSize` as advertised in the `ConfigPacket`.
+    #[must_use]
+    pub fn mtu_size(&self) -> i32 {
+        self.mtu_size
+    }
+
+    /// `voice.maxExtraAudioBroadcastDistance`, part of the relay radius.
+    #[must_use]
+    pub fn max_extra_audio_broadcast_distance(&self) -> i32 {
+        self.max_extra_audio_broadcast_distance
+    }
+
+    /// Whether an auto-expired mute is announced to the player.
+    #[must_use]
+    pub fn notify_unmuted(&self) -> bool {
+        self.notify_unmuted
+    }
+
     /// The activation catalogue this server offers.
+    ///
+    /// The proximity activation's allowed distances and fallback distance come
+    /// from the configuration: upstream builds them out of
+    /// `voice.proximity().distances` / `.defaultDistance` once at server
+    /// construction (`ProximityServerActivation.java:48`).
     #[must_use]
     pub fn activations(&self) -> Vec<VoiceActivation> {
-        vec![proximity_activation()]
+        let distances = self.distances.clone();
+        let default_distance = self.default_distance;
+        let mut activation = proximity_activation();
+        activation.distances = distances;
+        activation.default_distance = default_distance;
+        vec![activation]
+    }
+
+    /// The capture contract advertised in the `ConfigPacket`, honouring the
+    /// configured sample rate and MTU.
+    #[must_use]
+    pub fn capture_info(&self) -> CaptureInfo {
+        CaptureInfo {
+            sample_rate: self.sample_rate,
+            mtu_size: self.mtu_size,
+            encoder_info: Some(CodecInfo {
+                name: "opus".to_string(),
+                params: vec![
+                    ("mode".to_string(), OPUS_MODE.to_string()),
+                    ("bitrate".to_string(), OPUS_BITRATE.to_string()),
+                ],
+            }),
+        }
     }
 
     /// The source-line catalogue this server offers.
@@ -190,7 +284,7 @@ impl ServerConfig {
     pub fn config_packet(&self, encryption: Option<EncryptionInfo>) -> ConfigPacket {
         ConfigPacket {
             server_id: self.server_id,
-            capture_info: capture_info(),
+            capture_info: self.capture_info(),
             encryption,
             source_lines: self.source_lines(),
             activations: self.activations(),
@@ -324,6 +418,32 @@ pub const DEFAULT_CONFIG_TOML: &str = "# Plasmo Voice server configuration
 # that keeps a flood from stalling the tick; anything beyond it is dropped by the
 # OS buffer, exactly like an overloaded real-time server (default 256).
 # max_datagrams_per_tick = 256
+#
+# Advertised microphone sample rate in Hz (upstream: voice.sampleRate, default
+# 48000, only powers of two from 8000 to 48000 are supported).
+# sample_rate = 48000
+#
+# Maximum client audio packet size in bytes (upstream: voice.mtuSize, default
+# 1024, valid range 128..=5000).
+# mtu_size = 1024
+#
+# The proximity distances the client may cycle through, in blocks
+# (upstream: voice.proximity.distances, default 8, 16, 32). Comma-separated;
+# sorted ascending, each must be 1..=1000.
+# distances = 8,16,32
+#
+# The distance the proximity activation starts at (upstream:
+# voice.proximity.defaultDistance, default 16). Must be one of the 'distances'.
+# default_distance = 16
+#
+# How many blocks beyond the largest proximity distance a player's voice still
+# reaches (upstream: voice.maxExtraAudioBroadcastDistance, default 16).
+# max_extra_audio_broadcast_distance = 16
+#
+# Whether the voice server tells a player when an automatically expired mute
+# lifts (upstream: voice.notifications.unmuted, default true). The /vmute and
+# /vunmute commands always announce their own changes.
+# notify_unmuted = true
 ";
 
 /// Server-runner settings read from `config.toml` in the data folder.
@@ -353,6 +473,24 @@ pub struct PluginConfig {
     /// `runtime::MAX_DATAGRAMS_PER_TICK` (itself the upstream-equivalent rate
     /// limit), default 256.
     pub max_datagrams_per_tick: usize,
+    /// `voice.sampleRate` (`VoiceServerConfig.java:140`), default [`SAMPLE_RATE`].
+    pub sample_rate: i32,
+    /// `voice.mtuSize` (`VoiceServerConfig.java:154`), default [`MTU_SIZE`].
+    pub mtu_size: i32,
+    /// `voice.proximity().distances` (`VoiceServerConfig.java:250`), default
+    /// [`PROXIMITY_DISTANCES`]. Sorted ascending at parse time, like upstream's
+    /// `Ints.asList(...)`.
+    pub distances: Vec<i32>,
+    /// `voice.proximity().defaultDistance` (`VoiceServerConfig.java:250`), default
+    /// [`PROXIMITY_DEFAULT_DISTANCE`]. Must be one of `distances`, or the client
+    /// would render a fallback distance the server never advertises.
+    pub default_distance: i32,
+    /// `voice.maxExtraAudioBroadcastDistance` (`VoiceServerConfig.java:137`),
+    /// default [`MAX_EXTRA_AUDIO_BROADCAST_DISTANCE`].
+    pub max_extra_audio_broadcast_distance: i32,
+    /// `voice.notifications().unmuted` (`VoiceServerConfig.java:272`), default
+    /// `true`: whether an automatically expired mute is announced to the player.
+    pub notify_unmuted: bool,
 }
 
 impl Default for PluginConfig {
@@ -362,6 +500,12 @@ impl Default for PluginConfig {
             keep_alive_timeout_ms: crate::server::KEEP_ALIVE_TIMEOUT_MS,
             advertised_ip: "0.0.0.0".to_string(),
             max_datagrams_per_tick: crate::runtime::MAX_DATAGRAMS_PER_TICK,
+            sample_rate: SAMPLE_RATE,
+            mtu_size: MTU_SIZE,
+            distances: PROXIMITY_DISTANCES.to_vec(),
+            default_distance: PROXIMITY_DEFAULT_DISTANCE,
+            max_extra_audio_broadcast_distance: MAX_EXTRA_AUDIO_BROADCAST_DISTANCE,
+            notify_unmuted: true,
         }
     }
 }
@@ -440,11 +584,87 @@ impl PluginConfig {
                         )
                     })?;
                 }
+                "sample_rate" => {
+                    config.sample_rate = value.parse().map_err(|error| {
+                        format!(
+                            "config key 'sample_rate' value {value:?} is not an integer: {error}"
+                        )
+                    })?;
+                    if !(SAMPLE_RATE_MIN..=SAMPLE_RATE_MAX).contains(&config.sample_rate) {
+                        return Err(format!(
+                            "config key 'sample_rate' value {value:?} is outside the supported \
+                             range {SAMPLE_RATE_MIN}..={SAMPLE_RATE_MAX}"
+                        ));
+                    }
+                }
+                "mtu_size" => {
+                    config.mtu_size = value.parse().map_err(|error| {
+                        format!("config key 'mtu_size' value {value:?} is not an integer: {error}")
+                    })?;
+                    if !(MTU_SIZE_MIN..=MTU_SIZE_MAX).contains(&config.mtu_size) {
+                        return Err(format!(
+                            "config key 'mtu_size' value {value:?} is outside the supported \
+                             range {MTU_SIZE_MIN}..={MTU_SIZE_MAX}"
+                        ));
+                    }
+                }
+                "distances" => {
+                    let mut distances = Vec::new();
+                    for part in value.split(',') {
+                        let distance = part.trim().parse::<i32>().map_err(|error| {
+                            format!(
+                                "config key 'distances' entry {part:?} is not an integer: {error}"
+                            )
+                        })?;
+                        if !(1..=MAX_PROXIMITY_DISTANCE).contains(&distance) {
+                            return Err(format!(
+                                "config key 'distances' entry {distance} is outside the \
+                                 supported range 1..={MAX_PROXIMITY_DISTANCE}"
+                            ));
+                        }
+                        distances.push(distance);
+                    }
+                    distances.sort_unstable();
+                    config.distances = distances;
+                }
+                "default_distance" => {
+                    config.default_distance = value.parse().map_err(|error| {
+                        format!(
+                            "config key 'default_distance' value {value:?} is not an integer: \
+                             {error}"
+                        )
+                    })?;
+                }
+                "max_extra_audio_broadcast_distance" => {
+                    config.max_extra_audio_broadcast_distance = value.parse().map_err(|error| {
+                        format!(
+                            "config key 'max_extra_audio_broadcast_distance' value {value:?} is \
+                             not an integer: {error}"
+                        )
+                    })?;
+                }
+                "notify_unmuted" => {
+                    config.notify_unmuted = value.parse().map_err(|error| {
+                        format!(
+                            "config key 'notify_unmuted' value {value:?} is not a boolean: \
+                             {error}"
+                        )
+                    })?;
+                }
                 _ => unknown.push(key),
             }
         }
         if !unknown.is_empty() {
             tracing::warn!(?unknown, "ignoring unknown keys in the voice config file");
+        }
+        // A fallback distance the server never advertises would render the client's
+        // initial proximity circle at a distance the allowed set cannot express.
+        if !config.distances.contains(&config.default_distance) {
+            return Err(format!(
+                "config key 'default_distance' value {} is not one of the configured \
+                 'distances' {:?}",
+                config.default_distance, config.distances
+            ));
         }
         Ok(config)
     }
@@ -455,14 +675,31 @@ impl PluginConfig {
         let mut out = String::from("# Plasmo Voice server configuration\n");
         out.push_str(&format!(
             "port = {}\nkeep_alive_timeout_ms = {}\nadvertised_ip = {}\n\
-             max_datagrams_per_tick = {}\n",
+             max_datagrams_per_tick = {}\nsample_rate = {}\nmtu_size = {}\ndistances = {}\n\
+             default_distance = {}\nmax_extra_audio_broadcast_distance = {}\n\
+             notify_unmuted = {}\n",
             self.port,
             self.keep_alive_timeout_ms,
             render_string(&self.advertised_ip, "\"0.0.0.0\""),
             self.max_datagrams_per_tick,
+            self.sample_rate,
+            self.mtu_size,
+            render_int_list(&self.distances),
+            self.default_distance,
+            self.max_extra_audio_broadcast_distance,
+            self.notify_unmuted,
         ));
         out
     }
+}
+
+/// Renders a `distances` list for flat TOML, comma-separated like the parser reads.
+fn render_int_list(values: &[i32]) -> String {
+    values
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Renders a string for flat TOML: quoted, with the default spelled out plainly.
@@ -484,29 +721,81 @@ mod plugin_config_tests {
         assert_eq!(config.keep_alive_timeout_ms, 15_000);
         assert_eq!(config.advertised_ip, "0.0.0.0");
         assert_eq!(config.max_datagrams_per_tick, 256);
+        assert_eq!(config.sample_rate, SAMPLE_RATE);
+        assert_eq!(config.mtu_size, MTU_SIZE);
+        assert_eq!(config.distances, vec![8, 16, 32]);
+        assert_eq!(config.default_distance, 16);
+        assert_eq!(
+            config.max_extra_audio_broadcast_distance,
+            MAX_EXTRA_AUDIO_BROADCAST_DISTANCE
+        );
+        assert!(config.notify_unmuted);
     }
 
     #[test]
     fn a_minimal_config_file_overrides_only_what_it_sets() {
-        let config = PluginConfig::from_toml("# comment\nkeep_alive_timeout_ms = 5000\n")
-            .expect("known keys parse");
+        let config = PluginConfig::from_toml(
+            "# comment\nkeep_alive_timeout_ms = 5000\nsample_rate = 24000\n",
+        )
+        .expect("known keys parse");
         assert_eq!(config.port, 0, "unset keys keep defaults");
         assert_eq!(config.keep_alive_timeout_ms, 5000);
         assert_eq!(config.advertised_ip, "0.0.0.0");
         assert_eq!(config.max_datagrams_per_tick, 256);
+        assert_eq!(config.sample_rate, 24_000);
+        assert_eq!(config.mtu_size, MTU_SIZE);
+        assert_eq!(config.distances, vec![8, 16, 32]);
+        assert_eq!(config.default_distance, 16);
+        assert!(config.notify_unmuted);
     }
 
     #[test]
     fn a_full_config_file_parses_every_key() {
         let config = PluginConfig::from_toml(
             "port = 24424\nkeep_alive_timeout_ms = 30000\nadvertised_ip = \"mc.example.com\"\n\
-             max_datagrams_per_tick = 512\n",
+             max_datagrams_per_tick = 512\nsample_rate = 24000\nmtu_size = 500\ndistances = \
+             32,8,16\ndefault_distance = 8\nmax_extra_audio_broadcast_distance = 32\n\
+             notify_unmuted = false\n",
         )
         .expect("all keys parse");
         assert_eq!(config.port, 24424);
         assert_eq!(config.keep_alive_timeout_ms, 30_000);
         assert_eq!(config.advertised_ip, "mc.example.com");
         assert_eq!(config.max_datagrams_per_tick, 512);
+        assert_eq!(config.sample_rate, 24_000);
+        assert_eq!(config.mtu_size, 500);
+        assert_eq!(
+            config.distances,
+            vec![8, 16, 32],
+            "distances are sorted ascending, like the activation needs them"
+        );
+        assert_eq!(config.default_distance, 8);
+        assert_eq!(config.max_extra_audio_broadcast_distance, 32);
+        assert!(!config.notify_unmuted);
+    }
+
+    #[test]
+    fn a_default_distance_outside_the_distances_is_rejected() {
+        let error = PluginConfig::from_toml("distances = 4,8,16\ndefault_distance = 32\n")
+            .expect_err("the fallback must be one of the advertised distances");
+        assert!(error.contains("default_distance"), "{error}");
+        assert!(error.contains("distances"), "{error}");
+    }
+
+    #[test]
+    fn a_sample_rate_outside_the_supported_range_is_rejected() {
+        let error = PluginConfig::from_toml("sample_rate = 96000\n")
+            .expect_err("96000 Hz is not a supported sample rate");
+        assert!(error.contains("sample_rate"), "{error}");
+        assert!(error.contains("8000..=48000"), "{error}");
+    }
+
+    #[test]
+    fn an_mtu_outside_the_supported_range_is_rejected() {
+        let error =
+            PluginConfig::from_toml("mtu_size = 8\n").expect_err("8 bytes is not a supported MTU");
+        assert!(error.contains("mtu_size"), "{error}");
+        assert!(error.contains("128..=5000"), "{error}");
     }
 
     #[test]
@@ -526,7 +815,9 @@ mod plugin_config_tests {
     #[test]
     fn to_toml_round_trips() {
         let config = PluginConfig::from_toml(
-            "port = 24424\nadvertised_ip = \"mc.example.com\"\nmax_datagrams_per_tick = 100\n",
+            "port = 24424\nadvertised_ip = \"mc.example.com\"\nmax_datagrams_per_tick = 100\n\
+             sample_rate = 24000\nmtu_size = 500\ndistances = 8,16\ndefault_distance = 16\n\
+             max_extra_audio_broadcast_distance = 32\nnotify_unmuted = false\n",
         )
         .expect("parses");
         let rendered = config.to_toml();
@@ -627,7 +918,7 @@ mod tests {
 
     #[test]
     fn the_capture_info_carries_a_mandatory_opus_encoder() {
-        let capture = capture_info();
+        let capture = ServerConfig::new(Uuid::nil()).capture_info();
         assert_eq!(capture.sample_rate, 48_000);
         assert_eq!(capture.mtu_size, 1024);
         let encoder = capture

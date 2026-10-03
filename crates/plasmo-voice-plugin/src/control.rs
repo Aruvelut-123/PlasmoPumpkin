@@ -27,15 +27,16 @@
 //! burst, which is why the joiner receives its own id 8.
 
 use plasmo_voice_core::wire::{
-    ConnectionPacket, LanguagePacket, LanguageRequestPacket, PlayerActivationDistancesPacket,
-    PlayerAudioEndPacket, PlayerDisconnectPacket, PlayerInfoPacket, PlayerInfoRequestPacket,
-    PlayerInfoUpdatePacket, PlayerListPacket, PlayerStatePacket, SelfSourceInfoPacket,
-    SourceAudioEndPacket, SourceInfoPacket, SourceInfoRequestPacket, TcpPacket,
+    ConnectionPacket, DistanceVisualizePacket, LanguagePacket, LanguageRequestPacket,
+    PlayerActivationDistancesPacket, PlayerAudioEndPacket, PlayerDisconnectPacket,
+    PlayerInfoPacket, PlayerInfoRequestPacket, PlayerInfoUpdatePacket, PlayerListPacket,
+    PlayerStatePacket, SelfSourceInfoPacket, SourceAudioEndPacket, SourceInfoPacket,
+    SourceInfoRequestPacket, TcpPacket,
 };
 use plasmo_voice_core::{PacketDirection, TcpCodec};
 use uuid::Uuid;
 
-use crate::config::{ServerConfig, client_version_is_supported};
+use crate::config::{PROXIMITY_VISUALIZE_COLOR, ServerConfig, client_version_is_supported};
 use crate::server::VoiceServer;
 
 /// The plugin-message channel Plasmo Voice 2.x speaks on.
@@ -103,8 +104,14 @@ impl ControlPlane {
     /// Creates a control plane for a server with the given id.
     #[must_use]
     pub fn new(server_id: Uuid) -> Self {
+        Self::with_config(ServerConfig::new(server_id))
+    }
+
+    /// Creates a control plane carrying an operator-overridden config.
+    #[must_use]
+    pub fn with_config(config: ServerConfig) -> Self {
         Self {
-            config: ServerConfig::new(server_id),
+            config,
             codec: TcpCodec::new(),
         }
     }
@@ -164,8 +171,7 @@ impl ControlPlane {
             TcpPacket::PlayerState(state) => self.on_player_state(server, player, &state),
             TcpPacket::PlayerAudioEnd(end) => self.on_audio_end(server, player, &end),
             TcpPacket::PlayerActivationDistances(distances) => {
-                self.on_activation_distances(server, player, &distances);
-                Vec::new()
+                self.on_activation_distances(server, player, &distances)
             }
             TcpPacket::SourceInfoRequest(request) => {
                 self.on_source_info_request(server, player, &request)
@@ -262,14 +268,36 @@ impl ControlPlane {
         vec![Outbound::broadcast(self.encode(&packet))]
     }
 
-    /// `PlayerActivationDistancesPacket` — recorded, never answered.
+    /// `PlayerActivationDistancesPacket` — recorded, and the proximity distance is
+    /// answered with a `DistanceVisualizePacket` exactly like upstream's
+    /// `ProximityServerActivation.onActivationDistanceChange`: the first set is
+    /// skipped (the client drew its circle from the activation's default distance),
+    /// and every later change is visualized with the fixed default colour.
     fn on_activation_distances(
         &self,
         server: &mut VoiceServer,
         player: Uuid,
         distances: &PlayerActivationDistancesPacket,
-    ) {
+    ) -> Vec<Outbound> {
+        // The proximity activation is the only one this server offers; upstream
+        // checks `activation.getId() != PROXIMITY_ID` and returns.
+        let activation = &self.config().activations()[0];
+        let was_set = server.activation_distance(&player, activation.id).is_some();
         server.set_activation_distances(&player, distances.distance_by_activation_id.clone());
+        if !was_set {
+            // The initial set never renders: `PlayerVoiceChat.activate` clears the
+            // circle, and the client's own render already matches the default.
+            return Vec::new();
+        }
+        let Some(distance) = server.activation_distance(&player, activation.id) else {
+            return Vec::new();
+        };
+        let packet = TcpPacket::DistanceVisualize(DistanceVisualizePacket {
+            radius: distance,
+            hex_color: PROXIMITY_VISUALIZE_COLOR,
+            position: None,
+        });
+        vec![Outbound::to_player(player, self.encode(&packet))]
     }
 
     /// `PlayerAudioEndPacket` — the stream for one activation is over.
@@ -283,6 +311,12 @@ impl ControlPlane {
         player: Uuid,
         end: &PlayerAudioEndPacket,
     ) -> Vec<Outbound> {
+        // A server-muted speaker's end packet is dropped alongside its audio
+        // (upstream `PlayerChannelHandler` checks the mute manager before handling
+        // the packet at all).
+        if crate::mute::is_muted(&player, crate::server::now_ms()) {
+            return Vec::new();
+        }
         let Some(source_id) = server.source_id_of(&player) else {
             return Vec::new();
         };
@@ -626,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn activation_distances_are_recorded_and_never_answered() {
+    fn activation_distances_are_recorded_and_answered_from_the_second_set() {
         let plane = ControlPlane::new(SERVER_ID);
         let mut server = server();
         connect(&mut server, ALICE, "1.1.1.1:10");
@@ -642,7 +676,10 @@ mod tests {
             .expect("encode");
 
         let messages = plane.handle(&mut server, ALICE, "Alice", "0.0.0.0", 8830, &payload);
-        assert!(messages.is_empty(), "upstream never answers this one");
+        assert!(
+            messages.is_empty(),
+            "the first set is never answered, like upstream's onActivationDistanceChange"
+        );
 
         let stored = server
             .registered_player(&ALICE)
@@ -654,6 +691,26 @@ mod tests {
             vec![(proximity, 32)],
             "an activation this server does not offer is dropped"
         );
+
+        // A *change* is visualized with the default colour, addressed to the player.
+        let changed = codec()
+            .encode(&TcpPacket::PlayerActivationDistances(
+                PlayerActivationDistancesPacket {
+                    distance_by_activation_id: vec![(proximity, 16)],
+                },
+            ))
+            .expect("encode");
+        let messages = plane.handle(&mut server, ALICE, "Alice", "0.0.0.0", 8830, &changed);
+        assert_eq!(messages.len(), 1, "a later change draws a new circle");
+        assert_eq!(messages[0].to, Some(ALICE), "directed at the player");
+        match decode(&messages[0].payload) {
+            TcpPacket::DistanceVisualize(visualize) => {
+                assert_eq!(visualize.radius, 16);
+                assert_eq!(visualize.hex_color, PROXIMITY_VISUALIZE_COLOR);
+                assert_eq!(visualize.position, None);
+            }
+            other => panic!("expected a DistanceVisualizePacket, got {other:?}"),
+        }
     }
 
     #[test]
@@ -953,7 +1010,7 @@ mod tests {
             plane
                 .handle(&mut server, ALICE, "Alice", "0.0.0.0", 8830, &distances)
                 .is_empty(),
-            "0x0D PlayerActivationDistances is recorded, never answered"
+            "0x0D PlayerActivationDistances is recorded; the first set is never answered"
         );
 
         // The other two are exercised by the dedicated tests above; assert here only that

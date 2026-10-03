@@ -51,6 +51,7 @@ pub mod config;
 pub mod control;
 pub mod crypto;
 pub mod language;
+pub mod mute;
 pub mod runtime;
 pub mod server;
 pub mod state;
@@ -60,6 +61,9 @@ pub mod channel;
 
 #[cfg(target_os = "wasi")]
 pub mod tick;
+
+#[cfg(target_os = "wasi")]
+pub mod commands;
 
 /// The plugin id other plugins address in `send-ipc-message`.
 pub const PLUGIN_ID: &str = "plasmo-voice";
@@ -238,8 +242,8 @@ mod glue {
     use crate::server::VoiceServer;
     use crate::state::VoiceServerState;
     use crate::{
-        PLUGIN_ID, PlasmoVoicePlugin, VOICE_IPC_NAMESPACE, VoiceIpc, channel, player_connect_reply,
-        tick,
+        PLUGIN_ID, PlasmoVoicePlugin, VOICE_IPC_NAMESPACE, VoiceIpc, channel, commands,
+        player_connect_reply, tick,
     };
 
     impl Plugin for PlasmoVoicePlugin {
@@ -353,6 +357,11 @@ mod glue {
             // are written from the tick pump, and read from the payload handler.
             let channel_handlers = channel::register(&context)?;
 
+            // The mute administration commands (`/vmute`, `/vunmute`, `/vmutelist`)
+            // and their permission nodes mirror upstream's `voiceMuteCommand`,
+            // `voiceUnmuteCommand` and `voiceMuteListCommand`.
+            let command_count = commands::register(&context)?;
+
             // The values are inlined into the message on purpose: Pumpkin's non-TTY
             // "simple logger" prints the message text only and drops every structured
             // field, so a field-only log line is an empty log line on a headless server —
@@ -361,10 +370,11 @@ mod glue {
                 port,
                 handler_id,
                 channel_handlers = ?channel_handlers,
+                commands = command_count,
                 enabled = persisted.enabled,
                 protocol = plasmo_voice_core::PROTOCOL_VERSION,
                 "the Plasmo Voice server is listening on UDP port {port} (tick handler \
-                 {handler_id}, channel handlers {channel_handlers:?})"
+                 {handler_id}, channel handlers {channel_handlers:?}, {command_count} commands)"
             );
             Ok(())
         }

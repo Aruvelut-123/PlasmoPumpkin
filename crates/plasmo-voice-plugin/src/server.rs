@@ -11,11 +11,13 @@ use std::collections::{HashMap, HashSet};
 use plasmo_voice_core::data::{
     CodecInfo, PlayerSourceInfo, SelfSourceInfo, SourceInfo, SourceInfoBase, VoicePlayerInfo,
 };
-use plasmo_voice_core::wire::{PingPacket, SelfAudioInfoPacket, SourceAudioPacket};
+use plasmo_voice_core::wire::{
+    PingPacket, PlayerInfoUpdatePacket, SelfAudioInfoPacket, SourceAudioPacket, TcpPacket,
+};
 use plasmo_voice_core::{PacketDirection, UdpCodec, UdpPacket};
 use uuid::Uuid;
 
-use crate::config::{MAX_EXTRA_AUDIO_BROADCAST_DISTANCE, ServerConfig, calculate_allowed_distance};
+use crate::config::{ServerConfig, calculate_allowed_distance};
 use crate::control::{ControlPlane, Outbound};
 
 /// A client known to the voice server.
@@ -240,9 +242,19 @@ impl VoiceServer {
     /// persisted value the data plane needs across reloads.
     #[must_use]
     pub fn new(server_secret: Uuid, aes_key: crate::crypto::AesKey) -> Self {
+        Self::new_with_config(server_secret, aes_key, ServerConfig::new(server_secret))
+    }
+
+    /// Like [`VoiceServer::new`], but carrying an operator-overridden config.
+    #[must_use]
+    pub fn new_with_config(
+        server_secret: Uuid,
+        aes_key: crate::crypto::AesKey,
+        config: ServerConfig,
+    ) -> Self {
         Self {
             codec: UdpCodec::new(),
-            control: ControlPlane::new(server_secret),
+            control: ControlPlane::with_config(config),
             by_secret: HashMap::new(),
             by_address: HashMap::new(),
             registered: HashMap::new(),
@@ -666,6 +678,20 @@ impl VoiceServer {
             .collect();
     }
 
+    /// The distance the player last chose for `activation_id`, if any.
+    ///
+    /// `None` until the player's first `PlayerActivationDistancesPacket` — the
+    /// same "never set" state upstream's `DistanceVisualizePacket` reply keys on.
+    #[must_use]
+    pub fn activation_distance(&self, player_id: &Uuid, activation_id: Uuid) -> Option<i32> {
+        self.registered
+            .get(player_id)?
+            .activation_distances
+            .iter()
+            .find(|(id, _)| *id == activation_id)
+            .map(|(_, distance)| *distance)
+    }
+
     /// Records where a player is, which is what makes the proximity relay possible.
     pub fn set_position(
         &mut self,
@@ -714,7 +740,9 @@ impl VoiceServer {
             player_info: VoicePlayerInfo {
                 player_id: player.player_id,
                 player_nick: nick,
-                muted: player.muted,
+                // `createPlayerInfo()` sets `muted` from the mute manager, so the
+                // client's volume tab shows the server mute.
+                muted: player.muted || crate::mute::is_muted(&player.player_id, now_ms()),
                 voice_disabled: player.voice_disabled,
                 microphone_muted: player.microphone_muted,
             },
@@ -745,10 +773,24 @@ impl VoiceServer {
         Some(VoicePlayerInfo {
             player_id: player.player_id,
             player_nick: player.name.clone().unwrap_or_default(),
-            muted: player.muted,
+            // `createPlayerInfo()` sets `muted` from the mute manager, so the
+            // client's volume tab shows the server mute.
+            muted: player.muted || crate::mute::is_muted(player_id, now_ms()),
             voice_disabled: player.voice_disabled,
             microphone_muted: player.microphone_muted,
         })
+    }
+
+    /// The `PlayerInfoUpdatePacket` broadcast reflecting a player's current state.
+    ///
+    /// The `vmute`/`vunmute` commands push this after touching the mute store so
+    /// every voice client's volume tab picks up the change, exactly like upstream's
+    /// `broadcastPlayerInfoUpdate` after a mute change.
+    #[must_use]
+    pub fn player_info_update(&self, player_id: &Uuid) -> Option<Outbound> {
+        let player_info = self.voice_player_info(player_id)?;
+        let packet = TcpPacket::PlayerInfoUpdate(PlayerInfoUpdatePacket { player_info });
+        Some(Outbound::broadcast(self.control().encode(&packet)))
     }
 
     /// The `SelfSourceInfo` a speaker is sent when its stream ends.
@@ -820,8 +862,10 @@ impl VoiceServer {
             return Vec::new();
         };
         let distance = calculate_allowed_distance(&activation, requested_distance);
+        // The configured extra broadcast distance, `voice.maxExtraAudioBroadcastDistance`
+        // (`VoiceServerConfig.java:137`).
         let radius = distance
-            .saturating_add(MAX_EXTRA_AUDIO_BROADCAST_DISTANCE)
+            .saturating_add(self.config().max_extra_audio_broadcast_distance())
             .min(distance.saturating_mul(2));
         let Some(source) = self.registered.get(speaker) else {
             return Vec::new();
@@ -1109,7 +1153,13 @@ impl VoiceServer {
             return refused;
         };
         // `isMicrophoneMuted()` / server-mute guards, checked before anything is built.
-        if player.microphone_muted || player.muted || player.voice_disabled {
+        // The server mute lives in [`crate::mute`]: a player muted with `vmute` has its
+        // audio refused here regardless of what its own client sends in `PlayerStatePacket`.
+        if player.microphone_muted
+            || player.muted
+            || player.voice_disabled
+            || crate::mute::is_muted(&player_id, now_ms())
+        {
             return refused;
         }
 

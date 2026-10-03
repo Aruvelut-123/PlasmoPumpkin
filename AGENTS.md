@@ -314,13 +314,18 @@ fixing the disagreement is part of your change.
    "Limitations"): only the proximity activation
    and source line exist, and the plugin's own `config.toml` covers only the
    server-runner knobs (`port`, `keep_alive_timeout_ms`, `advertised_ip`,
-   `max_datagrams_per_tick`); permissions are not enforced and there is no server-side mute manager —
+   `max_datagrams_per_tick`, `sample_rate`, `mtu_size`, `distances`,
+   `default_distance`, `max_extra_audio_broadcast_distance`, `notify_unmuted`);
+   permissions are not enforced (any player with command access can `/vmute`, and the
+   `/vmute` `@`-selectors are not mirrored) —
    though vanish **is** honored: `tick.rs` re-mirrors the host's `canSee` into
    `server.set_hidden_players` once a second and `proximity_listener_ids` mutes a
    vanished pair in both directions; positions come from `PlayerMoveEvent` rather
    than live world reads; and the
-   decoration packets (`ConfigPlayerInfo`, `DistanceVisualize`, `AnimatedActionBar`, the
-   addon/entity/static source variants) are not sent. Do not describe the plugin as "fully
+   decoration packets (`ConfigPlayerInfo`, `AnimatedActionBar`, the
+   addon/entity/static source variants) are not sent (`DistanceVisualize` **is**, on
+   proximity distance changes — see `control.rs`'s `on_activation_distances`). Do not
+   describe the plugin as "fully
    compatible" while those are open.
    The missing-public-key fallback is a design choice, not a gap: a real client always
    generates an RSA key pair and sends the public half in `PlayerInfoPacket`
@@ -382,8 +387,10 @@ never relays a stranger's audio.
 | Module | Role |
 | --- | --- |
 | `channel.rs` | the ABI shim: host events in, `Outbound` messages out. The only module that names the Pumpkin channel API. |
-| `control.rs` | the state machine: the handshake, the burst, and every serverbound packet's reply. Host-testable, no Pumpkin types. |
-| `config.rs` | the `ConfigPacket` this server advertises, the version/distance gates, and the plugin's own `config.toml` (the `port` / `keep_alive_timeout_ms` / `advertised_ip` / `max_datagrams_per_tick` knobs). |
+| `control.rs` | the state machine: the handshake, the burst, and every serverbound packet's reply, plus the `DistanceVisualize` reply on an activation-distance change. Host-testable, no Pumpkin types. |
+| `config.rs` | the `ConfigPacket` this server advertises, the version/distance gates, and the plugin's own `config.toml` (the `port` / `keep_alive_timeout_ms` / `advertised_ip` / `max_datagrams_per_tick` / `sample_rate` / `mtu_size` / `distances` / `default_distance` / `max_extra_audio_broadcast_distance` / `notify_unmuted` knobs). |
+| `commands.rs` | the `/vmute`, `/vunmute` and `/vmutelist` chat commands (WASI only). |
+| `mute.rs` | the persisted mute store (`mutes.toml`), the duration parser, and the mute/unmute notice texts. |
 | `language.rs` | the translation table and the locale lookup (see §10). |
 | `server.rs` | the UDP semantics: per-connection secrets, activation- and position-filtered fan-out, keep-alive. |
 | `runtime.rs` | the process-global socket, the bind, and the bounded per-tick pump (the budget comes from `config.toml`'s `max_datagrams_per_tick`). |

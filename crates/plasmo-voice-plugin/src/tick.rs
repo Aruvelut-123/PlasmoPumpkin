@@ -32,8 +32,11 @@
 
 use pumpkin_plugin_api::Server;
 use pumpkin_plugin_api::events::{EventData, EventHandler, EventPriority, ServerTickStartEvent};
+use pumpkin_plugin_api::text::TextComponent;
 
 use crate::channel::{self, wit_uuid};
+use crate::commands::broadcast_player_info;
+use crate::mute;
 use crate::runtime::with_runtime;
 
 /// How often the vanish table is re-read from the host, in server ticks.
@@ -41,6 +44,14 @@ use crate::runtime::with_runtime;
 /// 20 ticks ≈ 1 s at the default 20 Hz, which is fine for a visibility mirror:
 /// the host's `hidePlayer`/`showPlayer` calls take effect on the next sync.
 const VISIBILITY_SYNC_TICKS: i32 = 20;
+
+/// How often temporary mutes are re-checked, in server ticks.
+///
+/// 100 ticks ≈ 5 s at the default 20 Hz, mirroring upstream `VoiceMuteManager`'s
+/// `scheduleAtFixedRate(..., 5, TimeUnit.SECONDS)` sweep. The store is also
+/// consulted per packet (`mute::is_muted`), so this sweep only announces the
+/// lift and tidies the table — nothing is enforced here.
+const MUTE_SWEEP_TICKS: i32 = 100;
 
 /// Cheap, zero-sized handle handed to the host as an event handler.
 ///
@@ -62,6 +73,12 @@ impl EventHandler<ServerTickStartEvent> for TickPump {
         // before the pump, means this tick's relay already uses fresh visibility.
         if event.tick % VISIBILITY_SYNC_TICKS == 0 {
             sync_visibility(&server);
+        }
+        // Lift expired temporary mutes on the same schedule as upstream
+        // (`VoiceMuteManager.tick()` every 5 s). The pump then flushes the
+        // PlayerInfoUpdate broadcasts below, like a `/vunmute` would.
+        if event.tick % MUTE_SWEEP_TICKS == 0 {
+            expire_mutes(&server);
         }
         let (received, sent) = with_runtime(|runtime| runtime.pump());
         // The socket and the channel cannot be driven from the same borrow, so the pump
@@ -132,6 +149,39 @@ fn sync_visibility(server: &Server) {
             protocol.set_hidden_players(hidden);
         }
     });
+}
+
+/// Lifts every expired temporary mute, mirroring upstream `VoiceMuteManager.tick()`:
+///
+/// 1. the store record is removed (`expire_due`), exactly like an `unmute`;
+/// 2. the voice clients hear about the change through a `PlayerInfoUpdate`;
+/// 3. the player is told `"You've been unmuted"` — unless `notify.unmuted` is off,
+///    upstream's `silent = ... || !notifications().unmuted()` gate.
+///
+/// Mute *enforcement* never relied on this sweep (packets are checked against
+/// `mute::is_muted` per datagram), so a delayed sweep only delays the notice.
+fn expire_mutes(server: &Server) {
+    let freed = mute::expire_due(crate::server::now_ms());
+    if freed.is_empty() {
+        return;
+    }
+    for player_id in &freed {
+        broadcast_player_info(player_id);
+    }
+    let notify = with_runtime(|runtime| {
+        runtime
+            .protocol()
+            .is_some_and(|protocol| protocol.config().notify_unmuted())
+    });
+    if !notify {
+        return;
+    }
+    let notice = mute::unmuted_notice();
+    for player_id in freed {
+        if let Some(player) = server.get_player_by_uuid(wit_uuid(player_id)) {
+            player.send_system_message(TextComponent::text(&notice), false);
+        }
+    }
 }
 
 /// Registers the tick pump with the server.

@@ -64,11 +64,20 @@ the way out.
   sends no usable public key gets a `ConfigPacket` without one and speaks in the clear,
   where upstream instead aborts the config packet entirely for that client.
 * **Proximity voice** — players hear each other by distance, with the activation and
-  source line from the in-game voice settings screen.
+  source line from the in-game voice settings screen. When a player changes the
+  distance, everyone who hears them is sent a `DistanceVisualize` circle update —
+  after the first set, exactly like upstream `onActivationDistanceChange`.
+* **Server-side mutes** — `/vmute`, `/vunmute` and `/vmutelist` enforce silence in
+  voice chat (the relay drops the muted player's frames and their mute state is
+  broadcast to every voice client), persist to `mutes.toml`, and announce to the
+  muted player with upstream's own wording — `"You've been muted …"`, and
+  `"You've been unmuted"` when a temporary mute expires (`voice.notify.unmuted`).
 * **Hosted configuration** — on first run the plugin writes a commented
   `config.toml` template (with the state file, in the plugin data folder); the UDP
-  port, keep-alive timeout, advertised IP and the per-tick datagram budget are read
-  from it at load. Every key is optional — delete one to keep the default.
+  port, keep-alive timeout, advertised IP, the per-tick datagram budget, the audio
+  sample rate and MTU size, the proximity distances (`8,16,32`), the default
+  distance, the extra broadcast radius and the unmute notification are read from it
+  at load. Every key is optional — delete one to keep the default.
 * **Localized replies** — `LanguagePacket` is answered in the client's own locale.
 
 ## Logs
@@ -76,7 +85,7 @@ the way out.
 A loaded server prints, at startup:
 
 ```text
-[INFO] the Plasmo Voice server is listening on UDP port 51572 (tick handler 0, channel handlers [1, 2, 3, 4, 5])
+[INFO] the Plasmo Voice server is listening on UDP port 51572 (tick handler 0, channel handlers [1, 2, 3, 4, 5], 3 commands)
 [INFO] the voice tick pump is running: the UDP socket on port Some(51572) is being drained
 ```
 
@@ -109,13 +118,16 @@ The connect → config → relay path works end to end, but this is not full ups
 
 * Only the **proximity** activation and source line exist, and the plugin's own
   `config.toml` covers only the server-runner knobs (`port`, `keep_alive_timeout_ms`,
-  `advertised_ip`, `max_datagrams_per_tick`) — there is no per-world voice config yet.
+  `advertised_ip`, `max_datagrams_per_tick`, `sample_rate`, `mtu_size`, `distances`,
+  `default_distance`, `max_extra_audio_broadcast_distance`, `notify_unmuted`) — there
+  is no per-world voice config yet.
 * **Vanish is honored**: a periodic `canSee` sweep (once a second) mirrors the host's
   hide/show state into the relay, and a vanished pair goes silent in **both** directions.
-  Server-side permissions and a mute manager are still missing.
+  Permissions are not enforced (any player with command access can `/vmute`), and the
+  `/vmute` `@`-selectors are not mirrored.
 * **Positions come from move events**, not live world reads.
-* **Decoration packets** (`ConfigPlayerInfo`, `DistanceVisualize`, `AnimatedActionBar`, the
-  addon/entity/static source variants) are not sent.
+* **Decoration packets** (`ConfigPlayerInfo`, `AnimatedActionBar`, the addon/entity/static
+  source variants) are not sent — `DistanceVisualize` is sent on proximity distance changes.
 * No jitter buffer, reordering or packet-loss concealment — frames are relayed as they arrive.
 
 ## Development
