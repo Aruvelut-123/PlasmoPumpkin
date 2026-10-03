@@ -123,12 +123,22 @@ The connect → config → relay path works end to end, but this is not full ups
   is no per-world voice config yet.
 * **Vanish is honored**: a periodic `canSee` sweep (once a second) mirrors the host's
   hide/show state into the relay, and a vanished pair goes silent in **both** directions.
-  Permissions are not enforced (any player with command access can `/vmute`), and the
-  `/vmute` `@`-selectors are not mirrored.
-* **Positions come from move events**, not live world reads.
-* **Decoration packets** (`ConfigPlayerInfo`, `AnimatedActionBar`, the addon/entity/static
-  source variants) are not sent — `DistanceVisualize` is sent on proximity distance changes.
-* No jitter buffer, reordering or packet-loss concealment — frames are relayed as they arrive.
+* **Mutes are enforced**: `/vmute`, `/vunmute` and `/vmutelist` are gated on the
+  upstream nodes `pv.mute`, `pv.unmute` and `pv.mutelist` (operator-only by default),
+  and the handlers re-check the same node. The two target commands accept names,
+  UUIDs and `@`-selectors; mutes persist across restarts in `mutes.toml`, lift on
+  schedule, and the muted player's client hears about every change.
+* **Positions are live**: the relay re-reads every voice player's position from the
+  host on a per-tick schedule (the move event is only a sub-tick hint), so distance
+  filtering never depends on events arriving.
+* **Config-player-info updates are not pushed mid-session**: the permission map is
+  sent once in `ConfigPacket` (upstream's default `pv.allow_freecam: true`), and
+  `ConfigPlayerInfo` is not re-sent when a player's permissions change. Only
+  **player** voice sources exist — no addon/entity/static variants, like upstream's
+  own server. (`DistanceVisualize` **is** sent on proximity distance changes.)
+* No server-side jitter buffer, reordering or packet-loss concealment — frames are
+  relayed as they arrive, and the client's own jitter buffer smooths the stream (the
+  same split upstream relies on).
 
 ## Development
 

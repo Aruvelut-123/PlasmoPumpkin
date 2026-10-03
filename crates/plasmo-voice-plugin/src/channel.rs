@@ -246,7 +246,10 @@ impl EventHandler<PlayerLeaveEvent> for LeaveHandler {
 ///
 /// Upstream reads positions live from the Minecraft server when it computes a listener
 /// set. A guest cannot: the world is behind the host boundary, so positions have to be
-/// pushed in, and this event is the push.
+/// pushed in. The [`crate::tick`] pump re-reads every player's live position on a fixed
+/// per-tick schedule (the authoritative path); this event is a sub-tick hint that keeps
+/// a moving player's position fresh between syncs. Both write the same slot, so a
+/// missed event is harmless.
 pub struct MoveHandler;
 
 impl EventHandler<PlayerMoveEvent> for MoveHandler {

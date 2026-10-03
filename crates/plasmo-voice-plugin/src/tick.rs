@@ -38,12 +38,28 @@ use crate::channel::{self, wit_uuid};
 use crate::commands::broadcast_player_info;
 use crate::mute;
 use crate::runtime::with_runtime;
+use uuid::Uuid;
 
 /// How often the vanish table is re-read from the host, in server ticks.
 ///
 /// 20 ticks ≈ 1 s at the default 20 Hz, which is fine for a visibility mirror:
 /// the host's `hidePlayer`/`showPlayer` calls take effect on the next sync.
 const VISIBILITY_SYNC_TICKS: i32 = 20;
+
+/// How often every voice player's live position is re-read from the host, in
+/// server ticks.
+///
+/// 1 tick ≈ 50 ms at the default 20 Hz, i.e. every tick: the relay should be
+/// able to trust the position table the way upstream trusts a live world read
+/// at relay time. The move event below is a sub-tick hint between syncs, not
+/// the source of truth — a player who joins and stands still, or who is moved
+/// by something that never fires a `PlayerMoveEvent`, still gets a position.
+const POSITION_SYNC_TICKS: i32 = 1;
+
+/// One live position read from the host: the player, the world they are in, and
+/// their coordinates. The world is `None` only between registration and the
+/// first successful read.
+type LivePosition = (Uuid, Option<String>, (f64, f64, f64));
 
 /// How often temporary mutes are re-checked, in server ticks.
 ///
@@ -69,6 +85,12 @@ impl EventHandler<ServerTickStartEvent> for TickPump {
         server: Server,
         event: EventData<ServerTickStartEvent>,
     ) -> EventData<ServerTickStartEvent> {
+        // Re-read every voice player's live position from the host, so the relay
+        // never depends on move events arriving (upstream reads the world at
+        // relay time; the scheduled sync is the guest's way to the same truth).
+        if event.tick % POSITION_SYNC_TICKS == 0 {
+            sync_positions(&server);
+        }
         // Re-mirror the host's vanish table a few times a second. Doing it here,
         // before the pump, means this tick's relay already uses fresh visibility.
         if event.tick % VISIBILITY_SYNC_TICKS == 0 {
@@ -147,6 +169,41 @@ fn sync_visibility(server: &Server) {
     with_runtime(|runtime| {
         if let Some(protocol) = runtime.protocol_mut() {
             protocol.set_hidden_players(hidden);
+        }
+    });
+}
+
+/// Re-reads every registered voice player's live position from the host.
+///
+/// Upstream computes a listener set by reading the world at relay time; a guest
+/// cannot reach the world directly, so this pushes the host's live positions in
+/// on a schedule. The `PlayerMoveEvent` handler in [`crate::channel`] is kept as
+/// a sub-tick hint, but it can miss players who never fire a move event (a
+/// freshly joined standing player, an external `/tp`), which is exactly what the
+/// per-tick sync catches. Skipping a player (offline or not yet registered)
+/// leaves their last known position in place, like a stale cache entry.
+fn sync_positions(server: &Server) {
+    // Snapshot the ids inside the lock (cheap), then query the host outside it
+    // (each `get_position` is a host round-trip), like `sync_visibility` does.
+    let ids = with_runtime(|runtime| {
+        runtime
+            .protocol()
+            .map_or_else(Vec::new, |protocol| protocol.registered_player_ids())
+    });
+
+    let mut fresh: Vec<LivePosition> = Vec::with_capacity(ids.len());
+    for id in ids {
+        let Some(player) = server.get_player_by_uuid(wit_uuid(id)) else {
+            continue;
+        };
+        fresh.push((id, Some(player.get_world().get_id()), player.get_position()));
+    }
+
+    with_runtime(|runtime| {
+        if let Some(protocol) = runtime.protocol_mut() {
+            for (player_id, world, position) in fresh {
+                protocol.set_position(&player_id, world, position);
+            }
         }
     });
 }

@@ -12,8 +12,9 @@
 //! with `CommandSender::has_permission` so a host version that ignores the
 //! registration gate still denies non-operators.
 //!
-//! Not mirrored from upstream: `@`-target selectors in `/vunmute` (`UnmuteTargetsType`)
-//! and the client-side duration suggestions (`MuteDurationType.listSuggestions`).
+//! Not mirrored from upstream: the client-side duration suggestions
+//! (`MuteDurationType.listSuggestions`), and the offline-profile path of
+//! `UnmuteTargetsType` (see the `/vunmute` handler).
 
 use pumpkin_plugin_api::command::{
     Arg, ArgumentType, Command, CommandError, CommandNode, CommandSender, ConsumedArgs, StringType,
@@ -171,8 +172,10 @@ impl CommandHandler for MuteHandler {
     }
 }
 
-/// The `/vunmute` executor. The target is a name or a UUID (upstream
-/// `UnmuteTargetsType` accepts both; its `@`-selectors are not mirrored).
+/// The `/vunmute` executor. The target is the host's `players` argument (a
+/// name, a UUID, or an `@`-selector), mirroring upstream `UnmuteTargetsType`.
+/// Every resolved player is unmuted in turn; the table is persisted once per
+/// mutation, exactly like `/vmute`.
 struct UnmuteHandler {
     folder: String,
 }
@@ -194,46 +197,40 @@ impl CommandHandler for UnmuteHandler {
             return Err(CommandError::PermissionDenied);
         }
 
-        let raw = match args.get_value("targets") {
-            Arg::Simple(target) if !target.is_empty() => target,
+        let players = match args.get_value("targets") {
+            Arg::Players(players) => players,
             _ => {
-                feedback(&sender, "/vunmute <name-or-uuid>");
+                feedback(&sender, "/vunmute <players>");
                 return Ok(0);
             }
         };
-
-        // UUID first, then an online player name. An offline name cannot be
-        // resolved without a profile service, and an unknown UUID still unmutes
-        // (there is simply nothing to remove), mirroring `UnmuteTargetsType`.
-        let resolved = if let Ok(id) = Uuid::parse_str(&raw) {
-            Some((id, raw.clone()))
-        } else {
-            server
-                .get_player_by_name(&raw)
-                .map(|player| (player_uuid(&player.get_id()), player.get_name()))
-        };
-        let Some((player_id, name)) = resolved else {
+        if players.is_empty() {
+            // An `@a`-style selector that matches nobody resolves to an empty
+            // list rather than a parse error, so this is the "no such player"
+            // answer, the same as `/vmute` gives.
             feedback(&sender, "Player not found");
             return Ok(0);
-        };
+        }
 
-        match mute::store().unmute(&player_id) {
-            Some(_) => {
-                if let Err(error) = mute::save(&self.folder) {
-                    tracing::warn!(%error, "could not persist the mute table");
-                    feedback(
-                        &sender,
-                        format!("unmuted {name} but could not persist: {error}"),
-                    );
-                    return Ok(0);
-                }
-                broadcast_player_info(&player_id);
-                if let Some(player) = server.get_player_by_uuid(wit_uuid(player_id)) {
+        for player in players {
+            let player_id = player_uuid(&player.get_id());
+            let name = player.get_name();
+            match mute::store().unmute(&player_id) {
+                Some(_) => {
+                    if let Err(error) = mute::save(&self.folder) {
+                        tracing::warn!(%error, "could not persist the mute table");
+                        feedback(
+                            &sender,
+                            format!("unmuted {name} but could not persist: {error}"),
+                        );
+                        continue;
+                    }
+                    broadcast_player_info(&player_id);
                     player.send_system_message(TextComponent::text(&mute::unmuted_notice()), false);
+                    feedback(&sender, format!("{name} unmuted"));
                 }
-                feedback(&sender, format!("{name} unmuted"));
+                None => feedback(&sender, format!("{name} is not muted")),
             }
-            None => feedback(&sender, format!("{name} is not muted")),
         }
         sender.set_success_count(1);
         Ok(0)
@@ -306,8 +303,15 @@ fn build_mute_command(folder: &str) -> Command {
 }
 
 /// Builds the `/vunmute` tree: `vunmute → targets`.
+///
+/// `targets` is the host's `players` argument, like `/vmute`: it accepts names,
+/// UUIDs and `@`-selectors, so the selector half of upstream `UnmuteTargetsType`
+/// is mirrored here. A plain UUID of a player who is **not** currently online
+/// cannot be resolved by the host (it only knows online players) — upstream
+/// resolves it through the profile service — so an offline unmute still has to
+/// wait for the player, or be done by editing `mutes.toml`.
 fn build_unmute_command(folder: &str) -> Command {
-    let targets = CommandNode::argument("targets", &ArgumentType::String(StringType::SingleWord))
+    let targets = CommandNode::argument("targets", &ArgumentType::Players)
         .execute(UnmuteHandler::new(folder.to_string()));
 
     Command::new(&["vunmute".to_string()], "Unmute players in the voice chat").then(targets)

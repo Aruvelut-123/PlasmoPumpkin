@@ -316,14 +316,18 @@ fixing the disagreement is part of your change.
    server-runner knobs (`port`, `keep_alive_timeout_ms`, `advertised_ip`,
    `max_datagrams_per_tick`, `sample_rate`, `mtu_size`, `distances`,
    `default_distance`, `max_extra_audio_broadcast_distance`, `notify_unmuted`);
-   permissions are not enforced (any player with command access can `/vmute`, and the
-   `/vmute` `@`-selectors are not mirrored) —
-   though vanish **is** honored: `tick.rs` re-mirrors the host's `canSee` into
+   permissions **are** enforced (`pv.mute`/`pv.unmute`/`pv.mutelist`, op by
+   default, double-checked inside the handlers), both target commands take
+   `@`-selectors, and the client-side duration suggestions are not mirrored;
+   vanish **is** honored: `tick.rs` re-mirrors the host's `canSee` into
    `server.set_hidden_players` once a second and `proximity_listener_ids` mutes a
-   vanished pair in both directions; positions come from `PlayerMoveEvent` rather
-   than live world reads; and the
-   decoration packets (`ConfigPlayerInfo`, `AnimatedActionBar`, the
-   addon/entity/static source variants) are not sent (`DistanceVisualize` **is**, on
+   vanished pair in both directions; positions are **live** — `tick.rs` re-reads
+   every registered player's position from the host every tick, with the
+   `PlayerMoveEvent` handler in `channel.rs` (`MoveHandler`) kept as a sub-tick
+   hint — and `ConfigPlayerInfo` is not re-sent when a player's permissions change
+   mid-session (`AnimatedActionBar` and the addon/entity/static source variants are
+   not sent either — upstream's own server never sends the former and never creates
+   the latter; `DistanceVisualize` **is**, on
    proximity distance changes — see `control.rs`'s `on_activation_distances`). Do not
    describe the plugin as "fully
    compatible" while those are open.
