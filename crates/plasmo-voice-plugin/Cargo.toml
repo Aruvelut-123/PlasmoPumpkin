@@ -27,7 +27,7 @@ tracing = "0.1"
 # RSA/ECB/PKCS1Padding — no digest. `getrandom` is what reaches the host's entropy, and it
 # is load-bearing: PKCS#1 v1.5 padding must be unpredictable, and a guessable AES key would
 # be worse than the plaintext this replaces.
-rsa = "0.9"
+rsa = "0.10"
 rand_core = { version = "0.6", features = ["getrandom"] }
 
 [target.'cfg(target_os = "wasi")'.dependencies]
